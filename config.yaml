@@ -1,0 +1,51 @@
+# config.yaml
+
+# Répertoire où se trouvent les sources COBOL "brutes"
+source_dir: "C:/Users/Utilisateur/Documents/Workplace/cobol_tools_files/cobol_source"
+
+# Répertoire de travail pour les fichiers normalisés (.cbl.etude)
+work_dir: "C:/Users/Utilisateur/Documents/Workplace/cobol_tools_files/cobol_work"
+
+# Répertoire de sortie pour les rapports, tableaux, graphes...
+output_dir: "C:/Users/Utilisateur/Documents/Workplace/cobol_tools_files/cobol_output"
+
+# Extensions considérées comme sources COBOL
+source_extensions:
+  - ".cbl"
+  - ".CBL"
+  - ".cob"
+  - ".COB"
+
+# Suffixe pour les fichiers d'étude
+etude_suffix: ".etude"
+
+# Encodage des fichiers COBOL d'entrée
+input_encoding: "latin-1"
+
+# Encodage des fichiers produits
+output_encoding: "utf-8"
+
+# Lignes à ignorer au moment de la normalisation
+ignore_prefixes:
+  - "SMASH"
+
+# Colonne commentaire COBOL (ici: '*' en col.7)
+comment_column: 7
+
+# Colonne de début du code COBOL (Area A en fixe)
+code_start_column: 8
+
+# Colonne de fin du code COBOL
+code_end_column: 72
+
+# Numéro de départ pour la renumérotation (seq)
+sequence_start: 1
+
+# Tris / filtres futurs sur les programmes
+program_filters:
+  # exemple : ne traiter que les programmes commençant par XXXXXXXX
+  startswith:
+    - "XXXXXXXX"
+  
+  endswith:
+    - "YYYYYYYY"
