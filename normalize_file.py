@@ -22,8 +22,9 @@ Règles :
 """
 
 import os
-from typing import Optional
-
+from typing import List, Dict, Optional
+import logging
+logger = logging.getLogger(__name__)
 
 def normalize_file(
     input_file: str,
@@ -108,6 +109,36 @@ def normalize_file(
     except Exception as e:
         print(f"[ERREUR] Ecriture {output_file} : {e}")
         return None
+
+def normalize_list_files(source_files: List[str], config: Dict) -> List[str]:
+    """
+    Normalise une liste de fichiers COBOL "bruts" en fichiers .etude.
+
+    - source_files : liste des chemins des sources COBOL (.cbl, .cob, etc.)
+    - config : dictionnaire charge a partir de config.yaml
+
+    Retourne la liste des chemins des fichiers .etude produits.
+    """
+    work_dir = config.get("work_dir", "./work")
+    input_encoding = config.get("input_encoding", "latin-1")
+    output_encoding = config.get("output_encoding", "utf-8")
+    seq_start = int(config.get("sequence_start", 1))
+
+    normalized_paths: List[str] = []
+
+    for src in source_files:
+        etude_path = normalize_file(
+            input_file=src,
+            work_dir=work_dir,
+            input_encoding=input_encoding,
+            output_encoding=output_encoding,
+            seq_start=seq_start,
+        )
+        # normalize_file peut retourner None si tu as prevu ce cas
+        if etude_path is not None:
+            normalized_paths.append(etude_path)
+
+    return normalized_paths
 
 
 # Mode autonome éventuel (optionnel)

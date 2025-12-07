@@ -15,7 +15,9 @@ Usage :
 import sys
 import os
 from dataclasses import dataclass
-from typing import List
+from typing import List, Dict, Any
+import logging
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -114,6 +116,52 @@ def print_paragraph_table(paragraphs: List[Paragraph], etude_path: str) -> None:
     for p in paragraphs:
         print(f"{p.order:5d}  {p.seq}  {p.name}")
 
+def extract_from_files(files: List[Any]) -> Dict[str, List[Paragraph]]:
+    """
+    Wrapper haut niveau :
+    - accepte soit une liste de chemins (str)
+      ex: [".../SRSTAB.cbl.etude", ".../SRSRRET.cbl.etude"]
+    - soit une liste de dictionnaires décrivant les fichiers normalisés
+      ex: [{"etude_path": ".../SRSTAB.cbl.etude", ...}, {...}, ...]
+
+    Retourne un dict :
+      { chemin_fichier: [Paragraph, ...] }
+    """
+    result: Dict[str, List[Paragraph]] = {}
+
+    for f in files:
+        # Cas 1 : f est déjà un chemin (str)
+        if isinstance(f, str):
+            etude_path = f
+
+        # Cas 2 : f est un dict -> on essaie de trouver une clé de chemin
+        elif isinstance(f, dict):
+            # On essaie plusieurs clés possibles, tu pourras adapter si besoin
+            possible_keys = ["etude_path", "normalized_path", "path", "file", "filename"]
+            etude_path = None
+
+            for key in possible_keys:
+                if key in f:
+                    etude_path = f[key]
+                    break
+
+            if etude_path is None:
+                raise KeyError(
+                    f"Aucune clé de chemin trouvée dans l'entrée : {f}. "
+                    f"Adapté 'possible_keys' dans extract_from_files()."
+                )
+
+        else:
+            raise TypeError(
+                f"Type inattendu dans files : {type(f)}. "
+                f"Attendu str ou dict."
+            )
+
+        # Maintenant on est sûr d'avoir un chemin texte
+        paragraphs = extract_paragraphs(etude_path)
+        result[etude_path] = paragraphs
+
+    return result
 
 def main():
     if len(sys.argv) != 2:

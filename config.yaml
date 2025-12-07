@@ -1,5 +1,11 @@
 # config.yaml
 
+logging:
+  enabled: true        # true = logs actifs, false = logs coupés (sauf CRITICAL si tu veux)
+  level: INFO          # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  to_file: true        # true = log fichier + console, false = console seulement
+  file_path: "cobol_tools.log"
+  
 # Répertoire où se trouvent les sources COBOL "brutes"
 source_dir: "C:/Users/Utilisateur/Documents/Workplace/cobol_tools_files/cobol_source"
 
@@ -40,6 +46,9 @@ code_end_column: 72
 
 # Numéro de départ pour la renumérotation (seq)
 sequence_start: 1
+
+# Génération des images depuis .dot
+generate_png_graphs: true
 
 # Tris / filtres futurs sur les programmes
 program_filters:

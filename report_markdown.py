@@ -30,6 +30,9 @@ from typing import Dict, List, Set
 
 import yaml
 
+import logging
+logger = logging.getLogger(__name__)
+
 from analysis_core import (
     analyze_program,
     Paragraph,

@@ -2,26 +2,36 @@
 # -*- coding: utf-8 -*-
 
 """
-find_callers.py
----------------
-A partir d'un fichier COBOL normalise (.cbl.etude),
-pour chaque paragraphe, recherche les lignes qui font
-  - GO TO <paragraphe>
-  - PERFORM <paragraphe>
+find_callers.py – version pipeline + version standalone
 
-Usage :
-    python find_callers.py chemin\MONPROG.cbl.etude
+Contient maintenant :
 
-Sortie texte sur stdout.
+1) La logique historique (appel en ligne de commande)
+2) Une fonction utilisable par main.py :
+       find_call_relations(paragraphs_info, config)
+
+Cette fonction retourne :
+    {
+        "NOMPROGRAMME": {
+            "paragraphs": [...],
+            "callers": { paragraphe -> liste de Caller }
+        },
+        ...
+    }
 """
 
 import sys
 import os
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import List, Dict, Any
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-# --- Reprise de la logique d'extraction des paragraphes --- #
+# ─────────────────────────────────────────────────────────────
+# Modèle
+# ─────────────────────────────────────────────────────────────
 
 @dataclass
 class Paragraph:
@@ -29,6 +39,17 @@ class Paragraph:
     seq: str
     name: str
 
+
+@dataclass
+class Caller:
+    seq: str        # séquence de la ligne appelante
+    call_type: str  # "GO TO" ou "PERFORM"
+    line: str       # texte brut (zone code)
+
+
+# ─────────────────────────────────────────────────────────────
+# Détection paragraphes
+# ─────────────────────────────────────────────────────────────
 
 def is_paragraph_line(line: str) -> bool:
     if len(line) < 8:
@@ -50,23 +71,22 @@ def is_paragraph_line(line: str) -> bool:
 
 
 def extract_paragraphs(etude_path: str) -> List[Paragraph]:
-    if not os.path.exists(etude_path):
-        raise FileNotFoundError(f"Fichier introuvable : {etude_path}")
-
     paragraphs: List[Paragraph] = []
     order = 1
     in_procedure_division = False
 
+    if not os.path.exists(etude_path):
+        raise FileNotFoundError(f"Fichier introuvable : {etude_path}")
+
     with open(etude_path, "r", encoding="latin-1", errors="ignore") as f:
         for raw in f:
             line = raw.rstrip("\n")
-
             if len(line) < 72:
                 line = line.ljust(72)
 
             code = line[7:72].strip()
 
-            # Detecter PROCEDURE DIVISION
+            # Détection PROCEDURE DIVISION
             if code.upper().startswith("PROCEDURE DIVISION"):
                 in_procedure_division = True
                 continue
@@ -87,29 +107,30 @@ def extract_paragraphs(etude_path: str) -> List[Paragraph]:
     return paragraphs
 
 
-# --- Recherche des GO TO / PERFORM --- #
+# ─────────────────────────────────────────────────────────────
+# Analyse GO TO / PERFORM pour un fichier
+# ─────────────────────────────────────────────────────────────
 
-@dataclass
-class Caller:
-    seq: str        # sequence de la ligne appelante
-    call_type: str  # "GO TO" ou "PERFORM"
-    line: str       # texte brut (zone code)
-
-
-def find_callers(etude_path: str, paragraphs: List[Paragraph]) -> Dict[str, List[Caller]]:
+def _analyze_file(etude_path: str) -> Dict[str, Any]:
     """
-    Pour chaque paragraphe, trouve les lignes qui font GO TO / PERFORM vers lui.
-    Retourne un dict: nom_paragraphe -> liste de Caller.
+    Analyse un fichier .cbl.etude :
+       - extraction des paragraphes
+       - recherche des GO TO / PERFORM
+
+    Retourne :
+        {
+            "paragraphs": [...],
+            "callers": { paragraphe -> liste de Caller }
+        }
     """
-    if not os.path.exists(etude_path):
-        raise FileNotFoundError(f"Fichier introuvable : {etude_path}")
+    logger.debug("Analyse des appels dans %s", etude_path)
+
+    paragraphs = extract_paragraphs(etude_path)
+    callers: Dict[str, List[Caller]] = {p.name: [] for p in paragraphs}
+    in_procedure_division = False
 
     # Table de lookup : nom_paragraphe -> Paragraph
-    para_by_name: Dict[str, Paragraph] = {p.name: p for p in paragraphs}
-
-    callers: Dict[str, List[Caller]] = {p.name: [] for p in paragraphs}
-
-    in_procedure_division = False
+    para_by_name = {p.name: p for p in paragraphs}
 
     with open(etude_path, "r", encoding="latin-1", errors="ignore") as f:
         for raw in f:
@@ -123,7 +144,7 @@ def find_callers(etude_path: str, paragraphs: List[Paragraph]) -> Dict[str, List
             if not code:
                 continue
 
-            # Detecter PROCEDURE DIVISION
+            # Détection PROCEDURE DIVISION
             if code.upper().startswith("PROCEDURE DIVISION"):
                 in_procedure_division = True
                 continue
@@ -132,36 +153,78 @@ def find_callers(etude_path: str, paragraphs: List[Paragraph]) -> Dict[str, List
                 continue
 
             tokens = code.split()
-            if not tokens:
-                continue
-
-            # Normaliser en majuscules pour la détection des mots-clés
             upper_tokens = [t.upper() for t in tokens]
 
-            # Recherche GO TO ou PERFORM dans la ligne
+            # Recherche GO TO / PERFORM
             for idx, tok in enumerate(upper_tokens):
-                if tok == "GO" and idx + 1 < len(upper_tokens) and upper_tokens[idx + 1] == "TO":
+                if tok == "GO" and idx + 1 < len(tokens) and upper_tokens[idx + 1] == "TO":
                     # GO TO <nom>
                     if idx + 2 < len(tokens):
-                        target_raw = tokens[idx + 2]
-                        target_name = target_raw.rstrip(".")
-                        if target_name in para_by_name:
-                            callers[target_name].append(
+                        target = tokens[idx + 2].rstrip(".")
+                        if target in para_by_name:
+                            callers[target].append(
                                 Caller(seq=seq, call_type="GO TO", line=code)
                             )
-                    # on continue la ligne, on pourrait avoir plusieurs appels, mais peu probable
+
                 elif tok == "PERFORM":
-                    # PERFORM <nom> ...
                     if idx + 1 < len(tokens):
-                        target_raw = tokens[idx + 1]
-                        target_name = target_raw.rstrip(".")
-                        if target_name in para_by_name:
-                            callers[target_name].append(
+                        target = tokens[idx + 1].rstrip(".")
+                        if target in para_by_name:
+                            callers[target].append(
                                 Caller(seq=seq, call_type="PERFORM", line=code)
                             )
 
-    return callers
+    return {
+        "paragraphs": paragraphs,
+        "callers": callers,
+    }
 
+
+# ─────────────────────────────────────────────────────────────
+# Fonction utilisée par main.py (pipeline)
+# ─────────────────────────────────────────────────────────────
+
+def find_call_relations(paragraphs_info: Dict[str, Any], config: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """
+    Fonction attendue par main.py dans le pipeline.
+
+    paragraphs_info = dict :
+        clé = chemin du fichier .cbl.etude
+        valeur = liste de Paragraph (ancienne structure)
+
+    Retourne un dict :
+        {
+            "PROGRAMME": {
+                "paragraphs": [...],
+                "callers": {paragraphe -> liste Caller}
+            }
+        }
+    """
+
+    logger.info("find_call_relations : début analyse GO TO / PERFORM")
+
+    results: Dict[str, Any] = {}
+
+    for etude_path in paragraphs_info.keys():
+        try:
+            analysis = _analyze_file(etude_path)
+
+            # Nom programme = nom fichier sans extension
+            filename = os.path.basename(etude_path)
+            program_name = filename.split(".")[0]
+
+            results[program_name] = analysis
+
+        except Exception as e:
+            logger.error("Erreur analyse GO TO/PERFORM dans %s : %s", etude_path, e)
+
+    logger.info("find_call_relations : analyse terminée (%d programmes)", len(results))
+    return results
+
+
+# ─────────────────────────────────────────────────────────────
+# Version standalone (appel direct)
+# ─────────────────────────────────────────────────────────────
 
 def print_callers_report(etude_path: str, paragraphs: List[Paragraph], callers: Dict[str, List[Caller]]) -> None:
     prog_name = os.path.basename(etude_path)
@@ -183,7 +246,7 @@ def print_callers_report(etude_path: str, paragraphs: List[Paragraph], callers: 
             for c in call_list:
                 print(f"    - {c.seq} via {c.call_type} : {c.line}")
 
-        print()  # ligne vide entre paragraphes
+        print()
 
 
 def main():
@@ -195,7 +258,7 @@ def main():
 
     try:
         paragraphs = extract_paragraphs(etude_path)
-        callers = find_callers(etude_path, paragraphs)
+        callers = _analyze_file(etude_path)["callers"]
         print_callers_report(etude_path, paragraphs, callers)
     except Exception as e:
         print(f"[ERREUR] {e}")

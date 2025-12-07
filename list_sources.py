@@ -17,6 +17,8 @@ Le log contient :
 import os
 import yaml
 from typing import List, Dict
+import logging
+logger = logging.getLogger(__name__)
 
 
 def load_config(config_path: str = "config.yaml") -> Dict:

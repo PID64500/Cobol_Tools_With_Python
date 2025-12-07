@@ -27,6 +27,8 @@ import re
 import yaml
 from dataclasses import dataclass
 from typing import List, Dict, Tuple
+import logging
+logger = logging.getLogger(__name__)
 
 
 # ===========================
@@ -422,6 +424,36 @@ def write_dot_file(dot_path: str,
             f.write(f'  "{e.src}" -> "{e.dst}" [{attr_txt}];\n')
 
         f.write("}\n")
+
+def generate_graph_for_file(etude_path: str, config: dict) -> str:
+    """
+    Construit le graphe pour un fichier .cbl.etude et écrit le .dot
+    dans le répertoire de sortie.
+    Retourne le chemin complet du fichier .dot généré.
+    """
+    if not os.path.exists(etude_path):
+        raise FileNotFoundError(f"Fichier introuvable pour le graphe : {etude_path}")
+
+    # Récupération du répertoire de sortie (même logique que le reste du projet)
+    output_dir = (
+        config.get("paths", {}).get("output_dir")
+        or config.get("output_dir")
+        or "./output"
+    )
+    output_dir = os.path.abspath(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Construction du graphe logique
+    paragraphs, edges, exit_nodes = build_graph(etude_path)
+
+    prog_name = os.path.basename(etude_path).replace(".cbl.etude", "")
+    dot_path = os.path.join(output_dir, f"{prog_name}_graph.dot")
+
+    # Écriture du fichier DOT
+    write_dot_file(dot_path, paragraphs, edges, exit_nodes)
+
+    logger.info("    → Graphe DOT généré : %s", dot_path)
+    return dot_path
 
 
 # ===========================

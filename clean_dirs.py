@@ -16,6 +16,8 @@ Vide les repertoires work_dir et output_dir definis dans config.yaml.
 import os
 import shutil
 from typing import Dict, List
+import logging
+logger = logging.getLogger(__name__)
 
 
 def ensure_dir(path: str) -> None:
