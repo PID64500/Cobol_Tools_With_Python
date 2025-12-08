@@ -1,7 +1,7 @@
 # config.yaml
 
 logging:
-  enabled: true        # true = logs actifs, false = logs coupés (sauf CRITICAL si tu veux)
+  enabled: true        # true = logs actifs, false = logs coupés (sauf CRITICAL)
   level: INFO          # DEBUG, INFO, WARNING, ERROR, CRITICAL
   to_file: true        # true = log fichier + console, false = console seulement
   file_path: "cobol_tools.log"
@@ -21,6 +21,17 @@ source_extensions:
   - ".CBL"
   - ".cob"
   - ".COB"
+
+pandoc:
+  exe: "C:/Program Files/Pandoc/pandoc.exe"
+  lang: "fr-FR"
+
+report:
+  outputs:
+    - format: "md"
+
+    - format: "docx"
+      template: null
 
 # Suffixe pour les fichiers d'étude
 etude_suffix: ".etude"

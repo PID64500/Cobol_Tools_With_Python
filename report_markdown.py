@@ -5,35 +5,19 @@
 report_markdown.py
 ------------------
 Génère un rapport Markdown pour un programme COBOL (.cbl.etude)
-en s'appuyant sur analysis_core.py.
-
-NOUVEAUTÉS :
-    - Synthèse générale enrichie
-    - Vue synthétique des flux (call graph)
-    - Analyse des risques structurels
-    - Interprétation fonctionnelle automatique
-    - Détail par paragraphe :
-        * Appels entrants
-        * Appels sortants
-        * Sorties CICS / programme
-
-Usage :
-    python report_markdown.py chemin/MONPROG.cbl.etude
-
-Sortie :
-    <output_dir>/<MONPROG>_report.md
+en s'appuyant sur analysis_core.py via analysis_core_wrapper.
 """
 
 import os
 import sys
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Tuple
 
 import yaml
-
 import logging
+
 logger = logging.getLogger(__name__)
 
-from analysis_core import (
+from analysis_core_wrapper import (
     analyze_program,
     Paragraph,
     Caller,
@@ -47,22 +31,13 @@ from analysis_core import (
 # ============================================================
 
 def load_config(config_path: str = "config.yaml") -> Dict:
-    """
-    Charge config.yaml si présent, sinon renvoie un dict minimal.
-    """
     if not os.path.exists(config_path):
-        return {
-            "output_dir": "./output"
-        }
+        return {"output_dir": "./output"}
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 
 def classify_paragraph(name: str) -> str:
-    """
-    Classe visuelle / fonctionnelle du paragraphe, pour le report.
-    Purement heuristique mais utile pour l'audit.
-    """
     u = name.upper()
     if name.startswith("000-") or "INIT" in u:
         return "Initialisation"
@@ -76,21 +51,15 @@ def classify_paragraph(name: str) -> str:
 
 
 # ============================================================
-#   Construction du graphe d'appels (sortants)
+#   Construction du graphe d'appels
 # ============================================================
 
 def build_call_graph(analysis: AnalysisResult) -> Dict[str, Set[str]]:
     """
-    Construit un graphe d'appels "sortants" à partir des callers_by_target.
-
-    callers_by_target : { target : [Caller(src_paragraph, ...), ...] }
-
-    On veut :
-        call_graph : { source : {target1, target2, ...} }
+    Graphe des appels internes (GO TO / PERFORM) :
+      call_graph[source] = { target1, target2, ... }
     """
-    call_graph: Dict[str, Set[str]] = {
-        p.name: set() for p in analysis.paragraphs
-    }
+    call_graph: Dict[str, Set[str]] = {p.name: set() for p in analysis.paragraphs}
 
     for target, callers in analysis.callers_by_target.items():
         for c in callers:
@@ -100,45 +69,243 @@ def build_call_graph(analysis: AnalysisResult) -> Dict[str, Set[str]]:
 
 
 # ============================================================
-#   Sections avancées du rapport
+#   Analyses structurelles avancées sur le graphe
+# ============================================================
+
+def compute_degrees(
+    analysis: AnalysisResult,
+    call_graph: Dict[str, Set[str]],
+) -> Dict[str, Dict[str, int]]:
+    """
+    Calcule pour chaque paragraphe :
+      - in_deg  : nb d'appels entrants
+      - out_deg : nb d'appels sortants internes
+    """
+    degrees: Dict[str, Dict[str, int]] = {}
+
+    for p in analysis.paragraphs:
+        name = p.name
+        in_deg = len(analysis.callers_by_target.get(name, []))
+        out_deg = len(call_graph.get(name, []))
+        degrees[name] = {"in": in_deg, "out": out_deg}
+
+    return degrees
+
+
+def compute_longest_paths(
+    entry_points: List[str],
+    call_graph: Dict[str, Set[str]],
+) -> Tuple[int, List[List[str]]]:
+    """
+    Calcule la longueur maximale des chaînes d'appel (en nb de nœuds)
+    et quelques exemples de chemins correspondants.
+
+    On fait un DFS depuis chaque entry point, en évitant les boucles infinies
+    via un 'stack' local (chemin courant).
+    """
+    max_len = 0
+    examples: List[List[str]] = []
+
+    def dfs(current: str, stack: List[str]):
+        nonlocal max_len, examples
+        if current in stack:
+            # cycle détecté, on arrête ce chemin
+            return
+        stack.append(current)
+        succ = sorted(call_graph.get(current, []))
+        if not succ:
+            # fin de chaîne
+            l = len(stack)
+            if l > max_len:
+                max_len = l
+                examples = [stack.copy()]
+            elif l == max_len and l > 0:
+                if len(examples) < 5:
+                    examples.append(stack.copy())
+        else:
+            for s in succ:
+                dfs(s, stack)
+        stack.pop()
+
+    for ep in entry_points:
+        dfs(ep, [])
+
+    return max_len, examples
+
+
+def find_cycles(call_graph: Dict[str, Set[str]]) -> List[List[str]]:
+    """
+    Détecte quelques cycles simples dans le graphe d'appels.
+    On ne cherche pas l'exhaustivité parfaite, mais de quoi signaler
+    dans l'analyse des risques qu'il existe des boucles dans les appels.
+    """
+    cycles: List[List[str]] = []
+    visited: Set[str] = set()
+    stack: List[str] = []
+
+    def dfs(node: str):
+        if node in stack:
+            idx = stack.index(node)
+            cycle = stack[idx:] + [node]
+            if cycle not in cycles and len(cycles) < 5:
+                cycles.append(cycle)
+            return
+        if node in visited:
+            return
+        visited.add(node)
+        stack.append(node)
+        for nxt in call_graph.get(node, []):
+            dfs(nxt)
+        stack.pop()
+
+    for n in call_graph.keys():
+        if n not in visited:
+            dfs(n)
+
+    return cycles
+
+
+def compute_reachable_from_entry_points(
+    entry_points: List[str],
+    call_graph: Dict[str, Set[str]],
+) -> Set[str]:
+    """
+    Ensemble des paragraphes atteignables depuis au moins un point d'entrée.
+    """
+    reachable: Set[str] = set()
+
+    def dfs(node: str):
+        if node in reachable:
+            return
+        reachable.add(node)
+        for nxt in call_graph.get(node, []):
+            dfs(nxt)
+
+    for ep in entry_points:
+        dfs(ep)
+
+    return reachable
+
+
+# ============================================================
+#   Score de propreté du code
+# ============================================================
+
+def compute_cleanliness_score(
+    analysis: AnalysisResult,
+    call_graph: Dict[str, Set[str]],
+) -> Dict[str, object]:
+    """
+    Calcule un "score de propreté" global (0-100) basé sur :
+      - nb de GO TO
+      - ratio de variables inutilisées
+      - présence de cycles dans le graphe
+      - profondeur maximale des chaînes d'appel
+      - nb de paragraphes inaccessibles
+    """
+    s = analysis.stats
+    nb_goto = s.get("nb_goto", 0)
+    nb_decl = s.get("nb_variables_declared", 0)
+    nb_unused = s.get("nb_variables_unused", 0)
+    nb_paras = s.get("nb_paragraphs", 0)
+
+    # 1. Pénalité liée aux GO TO
+    penalty_goto = min(30, nb_goto * 2)
+
+    # 2. Variables mortes
+    ratio_dead = 0.0
+    if nb_decl > 0:
+        ratio_dead = nb_unused / nb_decl * 100.0
+    # Jusqu'à 25 points de pénalité si beaucoup de variables mortes
+    penalty_deadvars = min(25, int(ratio_dead * 0.3))
+
+    # 3. Cycles
+    cycles = find_cycles(call_graph)
+    penalty_cycles = 15 if cycles else 0
+
+    # 4. Profondeur des chaînes d'appel
+    penalty_depth = 0
+    if analysis.entry_points:
+        max_len, _ = compute_longest_paths(analysis.entry_points, call_graph)
+        if max_len >= 8:
+            penalty_depth = 10
+        elif max_len >= 6:
+            penalty_depth = 5
+
+    # 5. Paragraphes inaccessibles
+    penalty_unreachable = 0
+    nb_unreachable = 0
+    if analysis.entry_points and nb_paras > 0:
+        reachable = compute_reachable_from_entry_points(analysis.entry_points, call_graph)
+        unreachable = [
+            p.name for p in analysis.paragraphs
+            if p.name not in reachable
+        ]
+        nb_unreachable = len(unreachable)
+        penalty_unreachable = min(15, nb_unreachable * 2)
+
+    total_penalty = penalty_goto + penalty_deadvars + penalty_cycles + penalty_depth + penalty_unreachable
+    score = max(0, 100 - total_penalty)
+
+    # Libellé qualitatif
+    if score >= 80:
+        label = "Très bon"
+    elif score >= 60:
+        label = "Correct"
+    elif score >= 40:
+        label = "À surveiller"
+    else:
+        label = "Critique"
+
+    breakdown = {
+        "score": score,
+        "label": label,
+        "ratio_dead": ratio_dead,
+        "penalty_goto": penalty_goto,
+        "penalty_deadvars": penalty_deadvars,
+        "penalty_cycles": penalty_cycles,
+        "penalty_depth": penalty_depth,
+        "penalty_unreachable": penalty_unreachable,
+        "nb_unreachable": nb_unreachable,
+        "has_cycles": bool(cycles),
+    }
+
+    # On stocke le score dans les stats pour d'autres rapports éventuels
+    analysis.stats["cleanliness_score"] = score
+    analysis.stats["cleanliness_label"] = label
+
+    return breakdown
+
+
+# ============================================================
+#   Sections du rapport
 # ============================================================
 
 def write_table_of_contents(f):
-    """
-    Écrit une petite table des matières (liens Markdown simples).
-    Les ancres dépendent du viewer, mais même sans liens cliquables
-    ça sert de sommaire rapide.
-    """
     f.write("## Sommaire\n\n")
     f.write("- [Synthèse générale](#synthèse-générale)\n")
     f.write("- [Vue synthétique des flux](#vue-synthétique-des-flux)\n")
     f.write("- [Table des paragraphes](#table-des-paragraphes)\n")
-    f.write("- [Points d'entrée potentiels](#points-dentrée-potentiels)\n")
     f.write("- [Analyse des risques](#analyse-des-risques)\n")
-    f.write("- [Interprétation fonctionnelle](#interprétation-fonctionnelle)\n")
-    f.write("- [Détail par paragraphe](#détail-par-paragraphe)\n")
-    f.write("- [Résumé exécutif (version courte)](#résumé-exécutif-version-courte)\n\n")
+    f.write("- [Variables inutilisées et score de propreté](#variables-inutilisées-et-score-de-propreté)\n")
+    f.write("- [Détail par paragraphe](#détail-par-paragraphe)\n\n")
 
 
 def write_flow_overview(f, analysis: AnalysisResult, call_graph: Dict[str, Set[str]]):
-    """
-    Écrit une vue synthétique des flux logiques à partir des points d'entrée.
-    On ne cherche pas l'exhaustivité des scénarios, mais une vision globale lisible.
-    """
     f.write("## Vue synthétique des flux\n\n")
 
     if not analysis.entry_points:
         f.write(
-            "Aucun point d'entrée évident (chaque paragraphe est appelé "
-            "par au moins un autre). La détermination des flux devra "
-            "s'appuyer sur le JCL ou les transactions CICS.\n\n"
+            "Aucun flux logique évident à partir des paragraphes analysés. "
+            "L'enchaînement réel dépendra du contexte d'appel (JCL, transaction CICS, etc.).\n\n"
         )
         return
 
     for ep in analysis.entry_points:
-        f.write(f"### Flux à partir de `{ep}`\n\n")
         visited: Set[str] = set()
         queue: List[str] = [ep]
+        lines: List[str] = []
+        has_flow = False
 
         while queue:
             src = queue.pop(0)
@@ -150,31 +317,46 @@ def write_flow_overview(f, analysis: AnalysisResult, call_graph: Dict[str, Set[s
             if not succ:
                 continue
 
+            has_flow = True
             succ_list = ", ".join(f"`{t}`" for t in succ)
-            f.write(f"- `{src}` → {succ_list}\n")
+            lines.append(f"- `{src}` → {succ_list}\n")
 
             for t in succ:
                 if t not in visited:
                     queue.append(t)
 
-        f.write("\n")
+        if has_flow:
+            f.write(f"### Flux à partir de `{ep}`\n\n")
+            for line in lines:
+                f.write(line)
+            f.write("\n")
 
 
 def write_risk_analysis(f, analysis: AnalysisResult, call_graph: Dict[str, Set[str]]):
     """
-    Détecte et commente quelques patterns de risque dans la structure du programme.
-    C'est volontairement simple, mais très utile en audit.
+    Analyse structurelle enrichie :
+      - nb de GO TO
+      - paragraphes avec plusieurs sorties
+      - paragraphes très sollicités (entrants)
+      - paragraphes "hub" (beaucoup d'entrants ET de sortants)
+      - paragraphes isolés
+      - paragraphes inaccessibles depuis les points d'entrée
+      - gestion d'anomalies centralisée
+      - profondeur maximale des chaînes d'appel
+      - cycles dans le graphe
     """
     f.write("## Analyse des risques\n\n")
 
     s = analysis.stats
     risks: List[str] = []
 
-    # 1. Présence de GO TO ?
-    if s["nb_goto"] > 0:
+    degrees = compute_degrees(analysis, call_graph)
+
+    # 1. Présence de GO TO
+    if s.get("nb_goto", 0) > 0:
         risks.append(
             f"⚠ Le programme contient **{s['nb_goto']}** instructions `GO TO` "
-            "→ complexité de lecture accrue et risques de flux difficiles à suivre."
+            "→ complexité de lecture accrue."
         )
 
     # 2. Paragraphes avec plusieurs sorties
@@ -183,39 +365,80 @@ def write_risk_analysis(f, analysis: AnalysisResult, call_graph: Dict[str, Set[s
         if len(analysis.exits_by_paragraph.get(p.name, [])) > 1
     ]
     if multi_exit_paras:
-        risks.append(
-            "⚠ Certains paragraphes possèdent **plusieurs points de sortie** "
-            "(XCTL / RETURN / GOBACK / STOP RUN) : "
-            + ", ".join(f"`{n}`" for n in multi_exit_paras)
+        risk = (
+            "⚠ Paragraphes avec plusieurs points de sortie "
+            "(XCTL / RETURN / GOBACK / STOP RUN) :\n\n"
         )
+        for n in multi_exit_paras:
+            risk += f"- `{n}`\n"
+        risk += "\n"
+        risks.append(risk)
 
-    # 3. Paragraphes fortement couplés (beaucoup d'appels entrants)
+    # 3. Paragraphes très sollicités (beaucoup d'entrants)
     high_in_degree = [
-        p.name for p in analysis.paragraphs
-        if len(analysis.callers_by_target.get(p.name, [])) >= 3
+        name for name, deg in degrees.items()
+        if deg["in"] >= 3
     ]
     if high_in_degree:
-        risks.append(
-            "⚠ Paragraphes très sollicités (>= 3 appels entrants), "
-            "potentiellement critiques ou à refactorer : "
-            + ", ".join(f"`{n}`" for n in high_in_degree)
-        )
+        risk = "⚠ Paragraphes très sollicités (≥ 3 appels entrants) :\n\n"
+        for n in high_in_degree:
+            risk += f"- `{n}`\n"
+        risk += "\n"
+        risks.append(risk)
 
-    # 4. Paragraphes sans appels entrants et sans sorties → code "isolé"
+    # 4. Paragraphes "hub" : beaucoup d'entrants ET de sortants
+    hubs = [
+        name for name, deg in degrees.items()
+        if deg["in"] >= 3 and deg["out"] >= 3
+    ]
+    if hubs:
+        risk = (
+            "⚠ Paragraphes jouant un rôle de 'hub' "
+            "(beaucoup d'entrants et de sortants) :\n\n"
+        )
+        for n in hubs:
+            risk += f"- `{n}`\n"
+        risk += "\n"
+        risks.append(risk)
+
+    # 5. Paragraphes isolés (aucun entrant, aucune sortie interne, aucune sortie CICS)
     isolated = []
     for p in analysis.paragraphs:
         callers = analysis.callers_by_target.get(p.name, [])
         exits = analysis.exits_by_paragraph.get(p.name, [])
-        if not callers and not exits:
+        out_deg = degrees[p.name]["out"]
+        if not callers and not exits and out_deg == 0:
             isolated.append(p.name)
     if isolated:
-        risks.append(
-            "ℹ Paragraphes non référencés et sans sortie : "
-            "potentiellement du code mort ou réservé à des évolutions : "
-            + ", ".join(f"`{n}`" for n in isolated)
+        risk = (
+            "ℹ Paragraphes isolés (non appelés et sans sortie) : "
+            "potentiellement du code mort ou des reliquats d'évolutions :\n\n"
         )
+        for n in isolated:
+            risk += f"- `{n}`\n"
+        risk += "\n"
+        risks.append(risk)
 
-    # 5. Paragraphes d'anomalies appelés depuis beaucoup d'endroits
+    # 6. Paragraphes inaccessibles depuis les points d'entrée
+    unreachable: List[str] = []
+    if analysis.entry_points:
+        reachable = compute_reachable_from_entry_points(analysis.entry_points, call_graph)
+        unreachable = [
+            p.name
+            for p in analysis.paragraphs
+            if p.name not in reachable
+        ]
+        if unreachable:
+            risk = (
+                "⚠ Paragraphes inaccessibles depuis les points d'entrée "
+                "(non atteints par les enchaînements GOTO/PERFORM) :\n\n"
+            )
+            for n in unreachable:
+                risk += f"- `{n}`\n"
+            risk += "\n"
+            risks.append(risk)
+
+    # 7. Gestion d'anomalies centralisée
     anomaly_paras = [
         p.name for p in analysis.paragraphs
         if "ANO" in p.name.upper() or "ANOM" in p.name.upper() or "ZZ" in p.name.upper()
@@ -225,12 +448,46 @@ def write_risk_analysis(f, analysis: AnalysisResult, call_graph: Dict[str, Set[s
         if len(analysis.callers_by_target.get(n, [])) >= 2
     ]
     if hotspot_anom:
-        risks.append(
-            "ℹ La gestion d'anomalies est centralisée dans : "
-            + ", ".join(f"`{n}`" for n in hotspot_anom)
-            + " → bon point pour la lisibilité, mais ces blocs sont critiques."
+        risk = (
+            "ℹ Gestion d'anomalies centralisée dans les paragraphes suivants "
+            "(points critiques du flux) :\n\n"
         )
+        for n in hotspot_anom:
+            risk += f"- `{n}`\n"
+        risk += "\n"
+        risks.append(risk)
 
+    # 8. Profondeur maximale des chaînes d'appel
+    if analysis.entry_points:
+        max_len, examples = compute_longest_paths(analysis.entry_points, call_graph)
+        if max_len > 0:
+            if max_len >= 6:
+                prefix = "⚠ Chaînes d'appel longues"
+            else:
+                prefix = "ℹ Chaînes d'appel"
+
+            if examples:
+                ex_path = " → ".join(f"`{n}`" for n in examples[0])
+                risks.append(
+                    f"{prefix} : profondeur maximale **{max_len}** paragraphe(s) "
+                    f"depuis un point d'entrée. Exemple : {ex_path}.\n"
+                )
+            else:
+                risks.append(
+                    f"{prefix} : profondeur maximale **{max_len}** paragraphe(s) "
+                    "depuis un point d'entrée.\n"
+                )
+
+    # 9. Cycles dans le graphe
+    cycles = find_cycles(call_graph)
+    if cycles:
+        risk = "⚠ Cycles détectés dans les appels de paragraphes (boucles logiques possibles) :\n\n"
+        for cyc in cycles:
+            risk += "- " + " → ".join(f"`{n}`" for n in cyc) + "\n"
+        risk += "\n"
+        risks.append(risk)
+
+    # Bilan
     if not risks:
         f.write(
             "Aucun risque structurel majeur détecté à partir de la seule analyse "
@@ -239,77 +496,102 @@ def write_risk_analysis(f, analysis: AnalysisResult, call_graph: Dict[str, Set[s
         )
     else:
         for r in risks:
-            f.write(f"- {r}\n")
-        f.write("\n")
+            f.write(f"{r}\n")
 
 
-def write_functional_interpretation(f, analysis: AnalysisResult):
+def write_variables_and_cleanliness(
+    f,
+    analysis: AnalysisResult,
+    call_graph: Dict[str, Set[str]],
+):
     """
-    Produit un texte d'interprétation fonctionnelle "semi-automatique"
-    en se basant sur les familles de paragraphes détectées.
+    Section dédiée :
+      - récap variables déclarées / inutilisées
+      - taux de variables mortes
+      - score de propreté global
+      - tableau "Variables inutilisées" par section
     """
-    categories: Dict[str, int] = {}
-    for p in analysis.paragraphs:
-        cat = classify_paragraph(p.name)
-        categories[cat] = categories.get(cat, 0) + 1
+    s = analysis.stats
+    total_decl = s.get("nb_variables_declared", 0)
+    total_unused = s.get("nb_variables_unused", 0)
+    total_used = s.get("nb_variables_used", 0)
 
-    f.write("## Interprétation fonctionnelle\n\n")
+    if total_decl > 0:
+        taux_mortes = (total_unused / total_decl) * 100.0
+    else:
+        taux_mortes = 0.0
 
-    if not categories:
+    # Score de propreté global
+    cleanliness = compute_cleanliness_score(analysis, call_graph)
+
+    f.write("## Variables inutilisées et score de propreté\n\n")
+
+    f.write("### Synthèse variables\n\n")
+    f.write(f"- Variables déclarées : **{total_decl}**\n")
+    f.write(f"- Variables utilisées au moins une fois : **{total_used}**\n")
+    f.write(f"- Variables inutilisées : **{total_unused}**\n")
+    f.write(f"- Taux de variables mortes : **{taux_mortes:.1f} %**\n\n")
+
+    f.write("### Score de propreté du code\n\n")
+    f.write(
+        f"- Score global de propreté : **{cleanliness['score']}/100** "
+        f"({cleanliness['label']})\n"
+    )
+    f.write(
+        "- Facteurs pris en compte : GO TO, variables mortes, cycles d'appels, "
+        "profondeur des chaînes d'appel, paragraphes inaccessibles.\n\n"
+    )
+
+    f.write("Détail des principales pénalités appliquées :\n\n")
+    f.write(
+        f"- Pénalité liée aux GO TO : **-{cleanliness['penalty_goto']}**\n"
+        f"- Pénalité liée aux variables mortes : **-{cleanliness['penalty_deadvars']}** "
+        f"(taux ≈ {cleanliness['ratio_dead']:.1f} %)\n"
+        f"- Pénalité liée aux cycles : **-{cleanliness['penalty_cycles']}**\n"
+        f"- Pénalité liée à la profondeur des chaînes : **-{cleanliness['penalty_depth']}**\n"
+        f"- Pénalité liée aux paragraphes inaccessibles : "
+        f"**-{cleanliness['penalty_unreachable']}** "
+        f"(parag. inaccessibles : {cleanliness['nb_unreachable']})\n\n"
+    )
+
+    # Tableau des variables inutilisées par section
+    f.write("### Tableau des variables inutilisées par section\n\n")
+
+    if total_decl == 0:
+        f.write("Aucune variable déclarée dans la DATA DIVISION.\n\n")
+        return
+
+    if not getattr(analysis, "unused_variables", None):
         f.write(
-            "La structure des paragraphes ne permet pas de dégager automatiquement "
-            "des blocs fonctionnels significatifs. Une analyse manuelle reste "
-            "nécessaire.\n\n"
+            "Aucune variable déclarée n'apparaît comme totalement inutilisée "
+            "dans la PROCEDURE DIVISION.\n\n"
         )
         return
 
-    f.write(
-        "À partir des noms de paragraphes et de leur regroupement typologique, "
-        "on peut proposer l'interprétation suivante (à confirmer fonctionnellement) :\n\n"
-    )
+    # Regroupement par section (WORKING-STORAGE, LINKAGE, LOCAL-STORAGE, ...)
+    by_section: Dict[str, List] = {}
+    for v in analysis.unused_variables:
+        by_section.setdefault(v.section, []).append(v)
 
-    f.write("Le programme semble organisé autour des blocs suivants :\n\n")
-    for cat, count in categories.items():
-        f.write(f"- **{cat}** : {count} paragraphe(s)\n")
-    f.write("\n")
-
-    # Petit texte générique
-    if "Initialisation" in categories:
-        f.write(
-            "- La présence d'un ou plusieurs paragraphes d'initialisation suggère "
-            "une mise en place explicite du contexte de traitement (zones de travail, "
-            "lecture de constantes, etc.).\n"
-        )
-    if "Gestion PFKEY / commande" in categories:
-        f.write(
-            "- Des paragraphes de gestion PFKEY indiquent une interaction "
-            "forte avec l'utilisateur (navigation, choix d'options, "
-            "pilotage de la suite des traitements par les touches de fonction).\n"
-        )
-    if "Bloc commun SRHP" in categories:
-        f.write(
-            "- Les blocs `SRHP-...` suggèrent des traitements communs factorisés "
-            "(sauvegarde de COMMAREA, appels d'interfaces, gestion d'IDMS, etc.).\n"
-        )
-    if "Gestion d'anomalies" in categories:
-        f.write(
-            "- Les paragraphes liés aux anomalies (`ANO`, `ANOM`, `ZZ`) concentrent "
-            "la gestion des erreurs et des cas exceptionnels ; ils sont souvent "
-            "critiques pour la robustesse et doivent être bien documentés.\n"
-        )
-
-    f.write("\n")
+    for section, vars_sec in sorted(by_section.items()):
+        f.write(f"#### Section {section}\n\n")
+        f.write("| Niveau | Nom | Seq | Déclaration |\n")
+        f.write("|--------|-----|-----|-------------|\n")
+        for v in sorted(vars_sec, key=lambda x: (x.level, x.name)):
+            decl_preview = v.decl_line.strip()
+            if len(decl_preview) > 80:
+                decl_preview = decl_preview[:77] + "."
+            f.write(
+                f"| {v.level} | `{v.name}` | {v.seq.strip()} | `{decl_preview}` |\n"
+            )
+        f.write("\n")
 
 
 # ============================================================
-#   Génération du rapport complet Markdown
+#   Rapport Markdown
 # ============================================================
 
 def make_markdown_report(etude_path: str, output_dir: str) -> str:
-    """
-    Génère le rapport Markdown pour un .cbl.etude donné.
-    Retourne le chemin complet du fichier généré.
-    """
     analysis = analyze_program(etude_path)
     call_graph = build_call_graph(analysis)
 
@@ -318,150 +600,122 @@ def make_markdown_report(etude_path: str, output_dir: str) -> str:
     os.makedirs(output_dir, exist_ok=True)
     md_path = os.path.join(output_dir, md_name)
 
-    # On suppose que le graphe PNG serait, si présent :
-    graph_png = os.path.join(output_dir, f"{prog_name}_graph.png")
-    graph_png_rel = os.path.basename(graph_png)
-
     with open(md_path, "w", encoding="utf-8") as f:
-        # Titre
+
         f.write(f"# Rapport d'analyse COBOL – {prog_name}\n\n")
-        f.write(f"*Fichier source analysé :*\n\n")
-        f.write(f"`{analysis.etude_path}`\n\n")
+        f.write("*Fichier analysé :*\n\n")
+        f.write(f"`{prog_name}`\n\n")
 
         # Sommaire
         write_table_of_contents(f)
 
-        # Synthèse générale
+        # Synthèse
         s = analysis.stats
         f.write("## Synthèse générale\n\n")
         f.write(f"- Nombre de paragraphes : **{s['nb_paragraphs']}**\n")
-        f.write(f"- Nombre total d'appels internes (GO TO / PERFORM) : **{s['nb_calls_total']}**\n")
-        f.write(f"  - GO TO : **{s['nb_goto']}**\n")
-        f.write(f"  - PERFORM : **{s['nb_perform']}**\n")
-        f.write(f"  - PERFORM THRU : **{s['nb_perform_thru']}**\n")
-        f.write(f"- Nombre de points de sortie CICS / programme : **{s['nb_exit_events']}**\n")
-        f.write(f"- Nombre de points d'entrée potentiels : **{len(analysis.entry_points)}**\n\n")
+        f.write(f"- Appels internes (GO TO/PERFORM) : **{s['nb_calls_total']}**\n")
+        f.write(f"- Points de sortie : **{s['nb_exit_events']}**\n\n")
 
-        # Graphe d'exécution si dispo
-        if os.path.exists(graph_png):
-            f.write("### Graphe logique d'exécution\n\n")
-            f.write(f"Le graphe d'exécution a été généré dans le fichier : `{graph_png}`.\n\n")
-            f.write(f"![Graphe d'exécution]({graph_png_rel})\n\n")
-        else:
-            f.write("### Graphe logique d'exécution\n\n")
-            f.write(
-                "Aucun fichier de graphe PNG détecté. "
-                "Si besoin, générez-le avec `graph_builder.py` avant ou après ce rapport.\n\n"
-            )
+        # Graphe logique
+        f.write("### Graphe logique d'exécution\n\n")
+        f.write("Le graphe logique d'exécution est généré dans le répertoire des graphes.\n\n")
 
-        # Vue synthétique des flux
+        # Flux
         write_flow_overview(f, analysis, call_graph)
 
-        # Table des paragraphes
+        # Table des paragraphes → liste à puces
         f.write("## Table des paragraphes\n\n")
-        f.write("| Ordre | Seq | Paragraphe | Rôle présumé |\n")
-        f.write("|-------|-----|------------|--------------|\n")
         for p in analysis.paragraphs:
-            role = classify_paragraph(p.name)
-            f.write(f"| {p.order} | {p.seq} | `{p.name}` | {role} |\n")
+            f.write(f"- {p.order} - {p.seq} - `{p.name}`\n")
         f.write("\n")
-
-        # Points d'entrée
-        f.write("## Points d'entrée potentiels\n\n")
-        if analysis.entry_points:
-            for name in analysis.entry_points:
-                role = classify_paragraph(name)
-                f.write(f"- `{name}` (*{role}*)\n")
-            f.write("\n")
-        else:
-            f.write(
-                "_Aucun point d'entrée sans appel détecté (tous les paragraphes sont référencés)._ \n\n"
-            )
 
         # Analyse des risques
         write_risk_analysis(f, analysis, call_graph)
 
-        # Interprétation fonctionnelle
-        write_functional_interpretation(f, analysis)
+        # Variables + score de propreté
+        write_variables_and_cleanliness(f, analysis, call_graph)
 
-        # Détail par paragraphe
+        # Détail
         f.write("## Détail par paragraphe\n\n")
+
         for p in analysis.paragraphs:
             f.write(f"### {p.name}  (seq {p.seq})\n\n")
 
-            # Appels entrants
             callers = analysis.callers_by_target.get(p.name, [])
-            f.write("**Appelé par :**\n\n")
+            succ = sorted(call_graph.get(p.name, []))
+            exits = analysis.exits_by_paragraph.get(p.name, [])
+
+            # On sépare juste pour la présentation
+            external_exits = [e for e in exits if e.kind == "XCTL"]
+            other_exits = [e for e in exits if e.kind != "XCTL"]
+
+            # AUCUN APPEL NI SORTIE
+            if not callers and not succ and not external_exits and not other_exits:
+                f.write("Aucun appel (entrant ou sortant).\n\n")
+                continue
+
+            # Appels entrants
             if callers:
+                f.write("**Appelé par :**\n\n")
                 for c in callers:
                     f.write(
-                        f"- `{c.src_paragraph}` (seq {c.seq}) via **{c.kind}** : "
+                        f"- `{c.src_paragraph}` (seq {c.seq}) par **{c.kind}** : "
                         f"`{c.line_text.strip()}`\n"
                     )
-            else:
-                f.write("- (aucun appel direct) → *point d'entrée possible*\n")
-            f.write("\n")
+                f.write("\n")
 
-            # Appels sortants
-            succ = sorted(call_graph.get(p.name, []))
-            f.write("**Appels sortants :**\n\n")
+            # Appels sortants internes
             if succ:
+                f.write("**Appels sortants internes (GO TO / PERFORM) :**\n\n")
                 for t in succ:
                     f.write(f"- vers `{t}`\n")
-            else:
-                f.write("- (aucun appel sortant direct vers un autre paragraphe)\n")
-            f.write("\n")
+                f.write("\n")
 
-            # Sorties
-            exits = analysis.exits_by_paragraph.get(p.name, [])
-            f.write("**Sorties CICS / fin de programme dans ce paragraphe :**\n\n")
-            if exits:
-                for e in exits:
+            # Sorties externes (XCTL, etc.)
+            if external_exits:
+                f.write("**Sorties vers l'extérieur (XCTL / RETURN / GOBACK / STOP RUN) :**\n\n")
+                for e in external_exits:
                     f.write(
-                        f"- [{e.kind}] {e.label} (seq {e.seq}) : "
+                        f"- {e.kind} (seq {e.seq}) : "
                         f"`{e.line_text.strip()}`\n"
                     )
-            else:
-                f.write("- (aucune sortie détectée dans ce paragraphe)\n")
-            f.write("\n")
+                f.write("\n")
 
-        # Mini conclusion / résumé exécutif
-        f.write("---\n\n")
-        f.write("### Résumé exécutif (version courte)\n\n")
-        f.write(
-            "Ce rapport fournit une vue structurée d'un programme COBOL existant : "
-            "paragraphes, appels internes et points de sortie CICS. "
-            "Il permet de comprendre rapidement l'organisation du code, "
-            "d'identifier les points d'entrée probables, les blocs de traitement "
-            "et la localisation de la gestion des anomalies. "
-            "Les risques mis en évidence (usage de GO TO, multiplicités de sorties, "
-            "paragraphes très sollicités) constituent de bons candidats pour des "
-            "actions de refactorisation ou de sécurisation.\n"
-        )
+            # Autres points de sortie
+            if other_exits:
+                f.write("**Autres points de sortie :**\n\n")
+                for e in other_exits:
+                    f.write(
+                        f"- {e.kind} (seq {e.seq}) : "
+                        f"`{e.line_text.strip()}`\n"
+                    )
+                f.write("\n")
 
     return md_path
 
 
 # ============================================================
-#   Programme principal
+#   CLI simple
 # ============================================================
 
-def main():
-    if len(sys.argv) != 2:
-        print("Usage : python report_markdown.py chemin/MONPROG.cbl.etude")
-        sys.exit(1)
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
 
-    etude_path = sys.argv[1]
-    if not os.path.exists(etude_path):
-        print(f"[ERREUR] Fichier introuvable : {etude_path}")
-        sys.exit(1)
+    if not argv:
+        print("Usage : report_markdown.py chemin/PROG.cbl.etude [config.yaml]")
+        return 1
 
-    config = load_config("config.yaml")
-    output_dir = os.path.abspath(config.get("output_dir", "./output"))
+    etude_path = argv[0]
+    config_path = argv[1] if len(argv) > 1 else "config.yaml"
+
+    cfg = load_config(config_path)
+    output_dir = cfg.get("output_dir", "./output")
 
     md_path = make_markdown_report(etude_path, output_dir)
-    print(f"[OK] Rapport Markdown généré : {md_path}")
+    print(f"Rapport généré : {md_path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
