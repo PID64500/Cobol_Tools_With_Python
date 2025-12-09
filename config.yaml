@@ -15,6 +15,12 @@ work_dir: "C:/Users/Utilisateur/Documents/Workplace/cobol_tools_files/cobol_work
 # Répertoire de sortie pour les rapports, tableaux, graphes...
 output_dir: "C:/Users/Utilisateur/Documents/Workplace/cobol_tools_files/cobol_output"
 
+# Type et répertoire des COPYBOOKS COBOL
+copybooks:
+  dir: "C:/Users/Utilisateur/Documents/Workplace/cobol_tools_files/cobol_copy"
+  extension: ".cpy"
+  enabled: true
+
 # Extensions considérées comme sources COBOL
 source_extensions:
   - ".cbl"

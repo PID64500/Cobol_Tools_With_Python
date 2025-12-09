@@ -278,6 +278,45 @@ def compute_cleanliness_score(
 
 
 # ============================================================
+#   Utilitaires de rendu des relations (refonte)
+# ============================================================
+
+def _format_seq(seq: str) -> str:
+    """
+    Normalise un numéro de séquence pour l'affichage.
+    - strip
+    - si numérique et court, on zero-pad sur 6 digits (000316)
+    """
+    if seq is None:
+        return ""
+    s = str(seq).strip()
+    if not s:
+        return ""
+    if s.isdigit() and len(s) < 6:
+        s = s.zfill(6)
+    return s
+
+
+def format_caller_relation(caller: Caller, target_paragraph: str) -> str:
+    """
+    Retourne une ligne de la forme :
+
+      100-1-VERIF-BATCH (000316) par **GO TO** 500-1-1-MES-PUPITRE
+
+    au lieu de l'ancienne forme verbeuse avec "seq" et la ligne complète.
+    """
+    seq = _format_seq(getattr(caller, "seq", ""))
+    kind = (getattr(caller, "kind", "") or "").upper()
+    src = getattr(caller, "src_paragraph", "")
+    target = target_paragraph
+
+    if seq:
+        return f"- {src} ({seq}) par **{kind}** {target}\n"
+    else:
+        return f"- {src} par **{kind}** {target}\n"
+
+
+# ============================================================
 #   Sections du rapport
 # ============================================================
 
@@ -635,33 +674,29 @@ def make_markdown_report(etude_path: str, output_dir: str) -> str:
         # Variables + score de propreté
         write_variables_and_cleanliness(f, analysis, call_graph)
 
-        # Détail
+        # -------- DÉTAIL PAR PARAGRAPHE (DANS LE WITH !) --------
         f.write("## Détail par paragraphe\n\n")
 
         for p in analysis.paragraphs:
-            f.write(f"### {p.name}  (seq {p.seq})\n\n")
-
             callers = analysis.callers_by_target.get(p.name, [])
             succ = sorted(call_graph.get(p.name, []))
             exits = analysis.exits_by_paragraph.get(p.name, [])
 
-            # On sépare juste pour la présentation
             external_exits = [e for e in exits if e.kind == "XCTL"]
             other_exits = [e for e in exits if e.kind != "XCTL"]
 
-            # AUCUN APPEL NI SORTIE
+            # Si le paragraphe est complètement "muet" du point de vue des relations,
+            # on ne l'affiche pas dans le détail (il reste visible dans les synthèses/risques).
             if not callers and not succ and not external_exits and not other_exits:
-                f.write("Aucun appel (entrant ou sortant).\n\n")
                 continue
+
+            f.write(f"### {p.name}  (seq {p.seq})\n\n")
 
             # Appels entrants
             if callers:
                 f.write("**Appelé par :**\n\n")
                 for c in callers:
-                    f.write(
-                        f"- `{c.src_paragraph}` (seq {c.seq}) par **{c.kind}** : "
-                        f"`{c.line_text.strip()}`\n"
-                    )
+                    f.write(format_caller_relation(c, p.name))
                 f.write("\n")
 
             # Appels sortants internes

@@ -4,10 +4,10 @@
 """
 normalize_file.py
 -----------------
-Étape 2 : normalisation d'un source COBOL pour analyse.
+Etape 2 : normalisation d'un source COBOL pour analyse.
 
 Fonction principale :
-  - normalize_file(input_file, work_dir, input_encoding, output_encoding, seq_start, copybooks_dir)
+  - normalize_file(input_file, work_dir, input_encoding, output_encoding)
 
 Règles :
   - Ignorer :
@@ -15,26 +15,16 @@ Règles :
       * lignes commençant par 'SMASH' en colonnes 1-5
       * lignes commençant par '//' (JCL éventuel)
       * lignes vides dans la zone code (colonnes 8-72)
-
-  - Re-générer les colonnes 1-6 avec un numéro de séquence numérique
-    à 6 chiffres, à partir de seq_start, incrémenté de 1 par ligne.
-
-  - Ne conserver que les colonnes 7-72 du source original
-    (colonnes 73-80 mises à blanc).
-
-  - Avant la normalisation, les COPY COBOL peuvent être développés à partir
-    de copybooks .cpy situés dans un répertoire dédié (copybooks_dir)
-    via expand_copybooks.expand_copybooks.
+  - Colonnes 1-6 : numéro de séquence 000001..999999
+  - Colonnes 7-72 : conservées telles quelles
+  - Colonnes 73-80 : espaces
+  - Sortie : fichier <work_dir>/<nom_source>.etude
 """
 
 import os
 from typing import List, Dict, Optional
 import logging
-
-from expand_copybooks import expand_copybooks
-
 logger = logging.getLogger(__name__)
-
 
 def normalize_file(
     input_file: str,
@@ -42,19 +32,16 @@ def normalize_file(
     input_encoding: str = "latin-1",
     output_encoding: str = "latin-1",
     seq_start: int = 1,
-    copybooks_dir: Optional[str] = None,
 ) -> Optional[str]:
     """
     Normalise un source COBOL et écrit le .etude dans work_dir.
 
     :param input_file: chemin du fichier COBOL d'origine
-    :param work_dir: répertoire de sortie pour le .etude
+    :param work_dir: repertoire de sortie pour le .etude
     :param input_encoding: encodage du fichier d'entrée
     :param output_encoding: encodage du fichier de sortie
-    :param seq_start: numéro de séquence initial (par défaut 1)
-    :param copybooks_dir: répertoire contenant les copybooks .cpy.
-                          Si None, aucun développement de COPY n'est effectué.
-    :return: chemin complet du fichier .etude généré, ou None en cas d'erreur
+    :param seq_start: numero de sequence initial (par defaut 1)
+    :return: chemin complet du fichier .etude genere, ou None en cas d'erreur
     """
     os.makedirs(work_dir, exist_ok=True)
 
@@ -68,14 +55,7 @@ def normalize_file(
         print(f"[ERREUR] Lecture {input_file} : {e}")
         return None
 
-    # Développement éventuel des COPY à partir des copybooks .cpy
-    try:
-        lines = expand_copybooks(lines, copybooks_dir)
-    except Exception as e:
-        # Sécurité : on logue l'erreur mais on continue avec les lignes originales
-        print(f"[WARNING] Échec du développement des COPY pour {input_file} : {e}")
-
-    out_lines: List[str] = []
+    out_lines = []
     seq = seq_start
 
     for raw in lines:
@@ -96,7 +76,7 @@ def normalize_file(
         if line.startswith("SMASH"):
             continue
 
-        # Ignorer les lignes '//' en colonne 1-2 (JCL résiduel par exemple)
+        # Ignorer les lignes '//' en colonne 1-2 (JCL residuel par exemple)
         if line.startswith("//"):
             continue
 
@@ -127,16 +107,15 @@ def normalize_file(
         print(f"[OK] Normalisé : {output_file}")
         return output_file
     except Exception as e:
-        print(f"[ERREUR] Écriture {output_file} : {e}")
+        print(f"[ERREUR] Ecriture {output_file} : {e}")
         return None
-
 
 def normalize_list_files(source_files: List[str], config: Dict) -> List[str]:
     """
     Normalise une liste de fichiers COBOL "bruts" en fichiers .etude.
 
     - source_files : liste des chemins des sources COBOL (.cbl, .cob, etc.)
-    - config : dictionnaire chargé à partir de config.yaml
+    - config : dictionnaire charge a partir de config.yaml
 
     Retourne la liste des chemins des fichiers .etude produits.
     """
@@ -144,10 +123,6 @@ def normalize_list_files(source_files: List[str], config: Dict) -> List[str]:
     input_encoding = config.get("input_encoding", "latin-1")
     output_encoding = config.get("output_encoding", "utf-8")
     seq_start = int(config.get("sequence_start", 1))
-
-    copybooks_cfg = config.get("copybooks", {})
-    copybooks_enabled = copybooks_cfg.get("enabled", True)
-    copybooks_dir = copybooks_cfg.get("dir") if copybooks_enabled else None
 
     normalized_paths: List[str] = []
 
@@ -158,9 +133,8 @@ def normalize_list_files(source_files: List[str], config: Dict) -> List[str]:
             input_encoding=input_encoding,
             output_encoding=output_encoding,
             seq_start=seq_start,
-            copybooks_dir=copybooks_dir,
         )
-        # normalize_file peut retourner None si une erreur est survenue
+        # normalize_file peut retourner None si tu as prevu ce cas
         if etude_path is not None:
             normalized_paths.append(etude_path)
 
