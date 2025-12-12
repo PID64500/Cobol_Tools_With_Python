@@ -9,7 +9,8 @@ Construit un dictionnaire de données COBOL à partir d'un fichier .etude
 
 Usage :
     python build_data_dictionary.py chemin/vers/programme.etude \
-        --out data_dictionary.csv
+        --out data_dictionary.csv \
+        [--ignore chemin/vers/ignore_variables.csv]
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ import csv
 import re
 from pathlib import Path
 from typing import List, Optional, Tuple
-
 
 # Regex de base
 PROGRAM_ID_RE = re.compile(r"\bPROGRAM-ID\.?\s+([A-Z0-9\-]+)", re.IGNORECASE)
@@ -34,13 +34,120 @@ LEVEL_RE = re.compile(
 )
 
 
+# --------------------------------------------------------------------
+#  Gestion des règles d'exclusion (ignore_variables.csv)
+# --------------------------------------------------------------------
+
+
+def load_ignore_rules(csv_path: Path) -> List[dict]:
+    """
+    Charge un fichier CSV de règles d'exclusion de variables.
+
+    Le fichier doit contenir au minimum les colonnes :
+      - scope        : "ALL" ou nom de programme
+      - match_type   : "NAME_EXACT", "NAME_PREFIX", ...
+      - pattern      : motif à comparer (en majuscules de préférence)
+      - comment      : libre, non utilisé par le code
+
+    Si le fichier n'existe pas, retourne une liste vide.
+
+    Encodage : on tente d'abord utf-8, puis latin-1 en fallback.
+    """
+    if csv_path is None or not csv_path.exists():
+        return []
+
+    # On essaie UTF-8, puis latin-1 en fallback
+    for encoding in ("utf-8", "latin-1"):
+        try:
+            rules: List[dict] = []
+            with csv_path.open("r", encoding=encoding, newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    scope = (row.get("scope") or "ALL").strip().upper()
+                    match_type = (row.get("match_type") or "NAME_EXACT").strip().upper()
+                    pattern = (row.get("pattern") or "").strip().upper()
+                    if not pattern:
+                        continue
+                    rules.append(
+                        {
+                            "scope": scope,
+                            "match_type": match_type,
+                            "pattern": pattern,
+                        }
+                    )
+            return rules
+        except UnicodeDecodeError:
+            # On tente l'encodage suivant
+            continue
+
+    # Si tout casse, on renvoie une liste vide
+    return []
+
+
+def should_ignore_entry(entry: dict, rules: List[dict]) -> bool:
+    """
+    Détermine si une entrée du dictionnaire doit être ignorée
+    en fonction des règles chargées.
+
+    V1 : on supporte principalement les match_type suivants :
+      - NAME_EXACT  : name == pattern
+      - NAME_PREFIX : name commence par pattern
+
+    Le champ 'scope' permet de limiter la règle à un programme :
+      - "ALL" : tous les programmes
+      - sinon : nom exact de programme (PROGRAM-ID).
+    """
+    if not rules:
+        return False
+
+    program = (entry.get("program") or "").strip().upper()
+    name = (entry.get("name") or "").strip().upper()
+
+    for rule in rules:
+        scope = rule.get("scope", "ALL")
+        match_type = rule.get("match_type", "NAME_EXACT")
+        pattern = rule.get("pattern", "")
+
+        if not pattern:
+            continue
+
+        # Filtre sur le scope (programme)
+        if scope not in ("", "ALL") and scope != program:
+            continue
+
+        if match_type == "NAME_EXACT":
+            if name == pattern:
+                return True
+        elif match_type == "NAME_PREFIX":
+            if name.startswith(pattern):
+                return True
+        else:
+            # Match types non gérés en V1 → ignorés proprement
+            continue
+
+    return False
+
+
+# --------------------------------------------------------------------
+#  Parsing COBOL
+# --------------------------------------------------------------------
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Construit un dictionnaire de données depuis un .etude COBOL.")
+    parser = argparse.ArgumentParser(
+        description="Construit un dictionnaire de données depuis un .etude COBOL."
+    )
     parser.add_argument("etude_path", help="Chemin du fichier .etude en entrée")
     parser.add_argument(
         "--out",
         default="data_dictionary.csv",
         help="Fichier CSV de sortie (défaut : data_dictionary.csv)",
+    )
+    parser.add_argument(
+        "--ignore",
+        help="Fichier CSV listant les variables à ignorer (facultatif). "
+             "Si non fourni, on cherche params/ignore_variables.csv à côté du script.",
+        default=None,
     )
     return parser.parse_args()
 
@@ -75,25 +182,35 @@ def detect_section(code: str, current_section: Optional[str]) -> Optional[str]:
 
 def detect_copy_source(code: str, current_source: str) -> str:
     """
-    Détecte une ligne commentaire *COPY NAME ou *END COPYBOOK NAME dans le code
-    et met à jour la source (MAIN ou nom du copybook).
+    Met à jour la "source" (MAIN ou nom de COPYBOOK) à partir du contenu
+    de la zone code.
 
-    Exemples de lignes code :
-        "*COPY SMASHTRC"
-        "*END COPYBOOK NAME"
+    Cas gérés à partir de l'exemple fourni :
+
+        000019*COPYBOOK SRSCOMIN
+        000021*END COPYBOOK SRSCOMIN
+
+    Donc dans la zone code (line[6:]) on verra :
+
+        *COPYBOOK SRSCOMIN
+        *END COPYBOOK SRSCOMIN
+
+    Règles :
+      - Ligne contenant '*END COPYBOOK' → retour à MAIN
+      - Ligne commençant par '*COPYBOOK <NOM>' → source = <NOM>
     """
-    stripped = code.strip()
-
-    # Début de COPYBOOK : on mémorise le nom du copybook comme source
-    if stripped.upper().startswith("*COPY "):
-        name = stripped[6:].strip()
-        if name:
-            return name.upper()
-        return current_source
+    upper = code.upper().strip()
 
     # Fin de COPYBOOK : on revient à MAIN
-    if stripped.upper().startswith("*END COPYBOOK NAME"):
+    if upper.startswith("*END COPYBOOK"):
         return "MAIN"
+
+    # Début de COPYBOOK : forme '*COPYBOOK NOMCOPY'
+    m = re.match(r"\*COPYBOOK\s+([A-Z0-9\-]+)", upper)
+    if m:
+        name = m.group(1).strip()
+        if name:
+            return name
 
     return current_source
 
@@ -248,7 +365,11 @@ def build_hierarchy(entries: List[dict]) -> None:
         e["full_path"] = full_path
 
 
-def build_data_dictionary(etude_path: Path, out_csv: Path) -> None:
+def build_data_dictionary(
+    etude_path: Path,
+    out_csv: Path,
+    ignore_csv: Optional[Path] = None,
+) -> None:
     """
     Construit le dictionnaire de données pour un .etude donné.
     """
@@ -285,6 +406,22 @@ def build_data_dictionary(etude_path: Path, out_csv: Path) -> None:
 
         entries.append(decl)
 
+    # Chargement des règles d'exclusion
+    rules: List[dict] = []
+    if ignore_csv is not None:
+        rules = load_ignore_rules(ignore_csv)
+
+    # Si aucune règle passée en argument, on tente la détection automatique
+    # de params/ignore_variables.csv à côté du script.
+    if not rules and ignore_csv is None:
+        script_dir = Path(__file__).resolve().parent
+        candidate = script_dir / "params" / "ignore_variables.csv"
+        rules = load_ignore_rules(candidate)
+
+    # Filtrage des entrées si des règles sont présentes
+    if rules:
+        entries = [e for e in entries if not should_ignore_entry(e, rules)]
+
     # Ajout parent_name / full_path
     build_hierarchy(entries)
 
@@ -318,11 +455,17 @@ def main() -> int:
     etude_path = Path(args.etude_path)
     out_csv = Path(args.out)
 
+    ignore_csv: Optional[Path]
+    if args.ignore:
+        ignore_csv = Path(args.ignore)
+    else:
+        ignore_csv = None  # auto-détection params/ignore_variables.csv
+
     if not etude_path.exists():
         print(f"[ERREUR] Fichier .etude introuvable : {etude_path}")
         return 1
 
-    build_data_dictionary(etude_path, out_csv)
+    build_data_dictionary(etude_path, out_csv, ignore_csv=ignore_csv)
     print(f"[OK] Dictionnaire de données généré : {out_csv}")
     return 0
 

@@ -9,16 +9,29 @@ logging:
 # Répertoire où se trouvent les sources COBOL "brutes"
 source_dir: "C:/Users/Utilisateur/Documents/Workplace/cobol_tools_files/cobol_source"
 
-# Répertoire de travail pour les fichiers normalisés (.cbl.etude)
+# Répertoire de travail
+# cobol_work/
+# ├── cics            ← fichiers relatifs à CICS  
+# ├── csv/            ← répertoire des csv généraux
+# ├── etude           ← sources normalisées (.etude)  
+# ├── data/           ← dictionnaire & données (dd, usage, unused, etc.)
+# │   ├── dd/
+# │   ├── usage/
+# │   └── unused/
+# └── tmp/            ← fichiers de debug, traces, brouillons
 work_dir: "C:/Users/Utilisateur/Documents/Workplace/cobol_tools_files/cobol_work"
 
 # Répertoire de sortie pour les rapports, tableaux, graphes...
+# cobol_output/
+# ├── reports/        ← .md, .odt, .docx (unité : programme)
+# ├── graphs/         ← .png/.svg générés à partir de .dot
+# ├── consolidated/   ← CSV globaux multi-programmes
+# └── log_export/     ← éventuellement, exports texte pour audit
 output_dir: "C:/Users/Utilisateur/Documents/Workplace/cobol_tools_files/cobol_output"
 
 # Type et répertoire des COPYBOOKS COBOL
 copybooks:
   dir: "C:/Users/Utilisateur/Documents/Workplace/cobol_tools_files/cobol_copy"
-  extension: ".cpy"
   enabled: true
 
 # Extensions considérées comme sources COBOL
@@ -27,6 +40,13 @@ source_extensions:
   - ".CBL"
   - ".cob"
   - ".COB"
+
+# Numéro de départ pour la renumérotation (seq)
+sequence_start: 1
+
+# Ignorer les lignes SMASH ajoutées par le debugger
+ignore_smash_lines: true
+
 
 pandoc:
   exe: "C:/Program Files/Pandoc/pandoc.exe"

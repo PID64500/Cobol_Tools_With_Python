@@ -16,8 +16,6 @@ Usage :
   python analyse_structures_logiques.py prog_dd.csv prog_usage.csv --out prog_structures.csv
 """
 
-from __future__ import annotations
-
 import argparse
 import csv
 from pathlib import Path
@@ -28,8 +26,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Analyse les structures logiques (blocs racines) d'un programme COBOL."
     )
-    parser.add_argument("dict_csv", help="CSV dictionnaire (sortie de build_data_dictionary.py)")
-    parser.add_argument("usage_csv", help="CSV usage (sortie de scan_variable_usage.py)")
+    parser.add_argument(
+        "dict_csv",
+        help="CSV dictionnaire (sortie de build_data_dictionary.py)"
+    )
+    parser.add_argument(
+        "usage_csv",
+        help="CSV usage (sortie de scan_variable_usage.py)"
+    )
     parser.add_argument(
         "--out",
         default="structures_logiques.csv",
@@ -47,47 +51,93 @@ def load_csv(path: Path) -> List[Dict[str, str]]:
     return rows
 
 
-def index_usage(usage_rows: List[Dict[str, str]]) -> Dict[tuple, Dict[str, str]]:
+def index_usage(usage_rows: List[Dict[str, str]]) -> Dict[str, Dict[str, str]]:
     """
-    Indexe les infos d'usage par (program, section, name, full_path).
+    Indexe les infos d'usage par "variable" (colonne du *_usage.csv).
 
-    On suppose que scan_variable_usage.py a ajouté au moins :
-      - used
-      - usage_count
-      - first_usage_line
+    Le fichier *_usage.csv produit par scan_variable_usage.py contient
+    les colonnes :
+
+        variable, usage_type, paragraph, line_etude, context_usage_final
+
+    Ici on regroupe par "variable" (qui correspond à full_path si disponible,
+    sinon à name) et on calcule :
+
+        used             : "Y" si au moins un usage existe
+        usage_count      : nombre total d'occurrences
+        first_usage_line : plus petit numéro de line_etude non vide
     """
-    index: Dict[tuple, Dict[str, str]] = {}
+    index: Dict[str, Dict[str, str]] = {}
+
     for r in usage_rows:
-        key = (
-            (r.get("program") or "").upper(),
-            (r.get("section") or "").upper(),
-            (r.get("name") or "").upper(),
-            (r.get("full_path") or "").upper(),
-        )
-        index[key] = r
+        var = (r.get("variable") or "").strip().upper()
+        if not var:
+            continue
+
+        line = (r.get("line_etude") or "").strip()
+
+        stats = index.get(var)
+        if not stats:
+            stats = {
+                "used": "Y",
+                "usage_count": "0",
+                "first_usage_line": "",
+            }
+            index[var] = stats
+
+        # Incrémenter le compteur
+        try:
+            cur = int(stats["usage_count"] or "0")
+        except ValueError:
+            cur = 0
+        stats["usage_count"] = str(cur + 1)
+
+        # Mettre à jour la première ligne d'utilisation
+        if line:
+            if not stats["first_usage_line"]:
+                stats["first_usage_line"] = line
+            else:
+                old_line = stats["first_usage_line"]
+                try:
+                    old_val = int(old_line)
+                    new_val = int(line)
+                    if new_val < old_val:
+                        stats["first_usage_line"] = line
+                except ValueError:
+                    # Si comparaison numérique impossible, on garde la première
+                    pass
+
     return index
 
 
 def enrich_dict_with_usage(
     dict_rows: List[Dict[str, str]],
-    usage_index: Dict[tuple, Dict[str, str]],
+    usage_index: Dict[str, Dict[str, str]],
 ) -> None:
     """
     Ajoute les colonnes d'usage (used, usage_count, first_usage_line)
     dans les lignes du dictionnaire, à partir de l'index usage.
+
+    La clé de jointure est :
+
+        variable_key = full_path.upper() si présent, sinon name.upper()
+
+    qui doit correspondre à la colonne "variable" du *_usage.csv.
     """
     for e in dict_rows:
-        key = (
-            (e.get("program") or "").upper(),
-            (e.get("section") or "").upper(),
-            (e.get("name") or "").upper(),
-            (e.get("full_path") or "").upper(),
-        )
-        u = usage_index.get(key)
-        if u:
-            e["used"] = u.get("used", "N")
-            e["usage_count"] = u.get("usage_count", "0")
-            e["first_usage_line"] = u.get("first_usage_line", "")
+        full_path = (e.get("full_path") or "").strip()
+        name = (e.get("name") or "").strip()
+
+        if full_path:
+            key = full_path.upper()
+        else:
+            key = name.upper()
+
+        stats = usage_index.get(key)
+        if stats:
+            e["used"] = stats.get("used", "Y")  # si présent dans usage → Y
+            e["usage_count"] = stats.get("usage_count", "0")
+            e["first_usage_line"] = stats.get("first_usage_line", "")
         else:
             # Par défaut, si pas trouvé dans usage
             e.setdefault("used", "N")
@@ -112,7 +162,12 @@ def is_root_structure(e: Dict[str, str]) -> bool:
 
 def analyse_structures(dict_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """
-    Construit la vue 'structures_logiques' à partir du dictionnaire enrichi.
+    Analyse les structures à partir du dictionnaire enrichi.
+
+    dict_rows : lignes du dictionnaire enrichies avec :
+      - used
+      - usage_count
+      - first_usage_line
 
     Sortie : une liste de dicts avec colonnes :
       program, section, source, root_name, level, full_path,
@@ -144,25 +199,23 @@ def analyse_structures(dict_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
                 descendants.append(e)
 
         # Séparer racine / enfants
-        children = [e for e in descendants if (e is not root)]
+        children = [
+            e for e in descendants
+            if (e.get("full_path") or e.get("name", "")) != root_fp
+        ]
 
-        # Calculs
         nb_children = len(children)
-        nb_children_used = sum(1 for e in children if (e.get("used") or "N") == "Y")
+        nb_children_used = sum(
+            1 for e in children if (e.get("used") or "N") == "Y"
+        )
 
-        has_occurs = any((e.get("occurs") or "").strip() not in ("", "0") for e in descendants)
+        has_occurs = any((e.get("occurs") or "").strip() for e in descendants)
         has_88 = any((e.get("level") or "").strip() == "88" for e in descendants)
 
-        # Une structure est considérée 'used' si :
-        # - la racine est utilisée, ou
-        # - au moins un enfant est utilisé
-        used_root = (root.get("used") or "N") == "Y"
-        used_children = nb_children_used > 0
-        used_flag = "Y" if (used_root or used_children) else "N"
-
-        # usage_count_total = somme des usage_count des descendants
+        # Agrégation des usages
         total_usage = 0
         first_usage_line = ""
+
         for e in descendants:
             try:
                 cnt = int(e.get("usage_count", "0") or "0")
@@ -176,7 +229,6 @@ def analyse_structures(dict_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
                 if not first_usage_line:
                     first_usage_line = line
                 else:
-                    # Comparaison naïve en numérique si possible
                     try:
                         cur = int(first_usage_line)
                         new = int(line)
@@ -197,20 +249,17 @@ def analyse_structures(dict_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
             "nb_children_used": str(nb_children_used),
             "has_occurs": "Y" if has_occurs else "N",
             "has_88": "Y" if has_88 else "N",
-            "used": used_flag,
+            "used": "Y" if total_usage > 0 else "N",
             "usage_count_total": str(total_usage),
             "first_usage_line": first_usage_line,
         }
+
         results.append(result)
 
     return results
 
 
 def write_structures_csv(structures: List[Dict[str, str]], out_path: Path) -> None:
-    if not structures:
-        print("[AVERTISSEMENT] Aucune structure racine trouvée.")
-        return
-
     fieldnames = [
         "program",
         "section",

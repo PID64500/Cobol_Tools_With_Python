@@ -6,32 +6,23 @@ normalize_file.py
 -----------------
 Étape 2 : normalisation d'un source COBOL pour analyse.
 
-Fonction principale :
-  - normalize_file(input_file, work_dir, input_encoding, output_encoding, seq_start, copybooks_dir)
-
-Règles :
-  - Ignorer :
-      * lignes commentaire (colonne 7 = '*')
-      * lignes commençant par 'SMASH' en colonnes 1-5
-      * lignes commençant par '//' (JCL éventuel)
-      * lignes vides dans la zone code (colonnes 8-72)
-
-  - Re-générer les colonnes 1-6 avec un numéro de séquence numérique
-    à 6 chiffres, à partir de seq_start, incrémenté de 1 par ligne.
-
-  - Ne conserver que les colonnes 7-72 du source original
-    (colonnes 73-80 mises à blanc).
-
-  - Avant la normalisation, les COPY COBOL peuvent être développés à partir
-    de copybooks .cpy situés dans un répertoire dédié (copybooks_dir)
-    via expand_copybooks.expand_copybooks.
+Pipeline pour un fichier COBOL :
+  1) Lecture du source brut
+  2) Expansion des COPY (avec REPLACING) via copy_expander.expand_copybooks
+  3) Filtrage des lignes inutiles :
+       - lignes SMASH de debugger (texte commençant par 'SMASH' après trim à gauche)
+       - commentaires (col 7 = '*') SAUF les sentinelles *COPYBOOK / *END COPYBOOK
+       - lignes JCL commençant par '//'
+       - lignes vides en zone code (col 8-72)
+  4) Renumérotation des lignes (col 1-6) à partir de seq_start
+  5) Écriture du .cbl.etude dans <work_dir>/etude
 """
 
 import os
 from typing import List, Dict, Optional
 import logging
 
-from expand_copybooks import expand_copybooks
+from copy_expander import expand_copybooks
 
 logger = logging.getLogger(__name__)
 
@@ -47,20 +38,17 @@ def normalize_file(
     """
     Normalise un source COBOL et écrit le .etude dans work_dir.
 
-    :param input_file: chemin du fichier COBOL d'origine
-    :param work_dir: répertoire de sortie pour le .etude
-    :param input_encoding: encodage du fichier d'entrée
-    :param output_encoding: encodage du fichier de sortie
-    :param seq_start: numéro de séquence initial (par défaut 1)
-    :param copybooks_dir: répertoire contenant les copybooks .cpy.
-                          Si None, aucun développement de COPY n'est effectué.
-    :return: chemin complet du fichier .etude généré, ou None en cas d'erreur
+    Règles importantes :
+      - expansion des COPY avant filtrage
+      - toute ligne dont le texte (après strip à gauche) commence par 'SMASH'
+        est ignorée (lignes de debugger), y compris si elles viennent d'un COPY.
     """
     os.makedirs(work_dir, exist_ok=True)
 
     base_name = os.path.basename(input_file)
     output_file = os.path.join(work_dir, base_name + ".etude")
 
+    # 1) Lecture du source brut
     try:
         with open(input_file, "r", encoding=input_encoding, errors="ignore") as fin:
             lines = fin.readlines()
@@ -68,41 +56,57 @@ def normalize_file(
         print(f"[ERREUR] Lecture {input_file} : {e}")
         return None
 
-    # Développement éventuel des COPY à partir des copybooks .cpy
+    # 2) Expansion des COPY (avec REPLACING)
     try:
         lines = expand_copybooks(lines, copybooks_dir)
     except Exception as e:
-        # Sécurité : on logue l'erreur mais on continue avec les lignes originales
-        print(f"[WARNING] Échec du développement des COPY pour {input_file} : {e}")
+        msg = f"[WARNING] Échec du développement des COPY pour {input_file} : {e}"
+        print(msg)
+        logger.warning(msg)
 
     out_lines: List[str] = []
     seq = seq_start
 
+    # 3) Filtrage + renumérotation
     for raw in lines:
-        line = raw.rstrip("\n")
+        # On enlève seulement le \n de fin
+        raw_line = raw.rstrip("\n")
 
-        # On s'assure d'avoir au moins 80 colonnes pour manipuler tranquillement
+        # 🔹 Filtre global SMASH (avant tout, sur le texte brut après trim à gauche)
+        if raw_line.lstrip().startswith("SMASH"):
+            continue
+
+        # On travaille sur 80 colonnes fixes
+        line = raw_line
         if len(line) < 80:
             line = line.ljust(80)
         else:
             line = line[:80]
 
-        # Colonne 7 = index 6
-        if line[6] == "*":
-            # Ligne commentaire : on l'ignore complètement
-            continue
-
-        # Ignorer les lignes SMASH en colonne 1-5
-        if line.startswith("SMASH"):
-            continue
-
-        # Ignorer les lignes '//' en colonne 1-2 (JCL résiduel par exemple)
+        # JCL éventuel : lignes commençant par //
         if line.startswith("//"):
             continue
 
-        # Si la ligne est vide dans la zone code (col 8-72), ignorer la ligne
+        # Gestion des commentaires / sentinelles
+        # Colonne 7 => index 6
+        indicator = line[6] if len(line) > 6 else " "
+
+        is_sent = False
+        if indicator == "*":
+            # zone col 7-72 pour tester *COPYBOOK / *END COPYBOOK
+            code_with_star = line[6:72]  # col 7-72 (inclut '*')
+            stripped = code_with_star.strip().upper()
+            if stripped.startswith("*COPYBOOK ") or stripped.startswith("*END COPYBOOK"):
+                is_sent = True
+
+        if indicator == "*" and not is_sent:
+            # vrai commentaire à ignorer
+            continue
+
+        # Zone code : colonnes 8-72
         code_area = line[7:72].strip()
         if code_area == "":
+            # ligne vide en zone code
             continue
 
         # Colonnes 1-6 : nouveau numéro de séquence
@@ -121,6 +125,7 @@ def normalize_file(
             print(f"[WARN] {input_file} : plus de 999999 lignes, arrêt.")
             break
 
+    # 4) Écriture du .etude
     try:
         with open(output_file, "w", encoding=output_encoding, errors="ignore") as fout:
             fout.writelines(out_lines)
@@ -135,12 +140,15 @@ def normalize_list_files(source_files: List[str], config: Dict) -> List[str]:
     """
     Normalise une liste de fichiers COBOL "bruts" en fichiers .etude.
 
-    - source_files : liste des chemins des sources COBOL (.cbl, .cob, etc.)
-    - config : dictionnaire chargé à partir de config.yaml
-
-    Retourne la liste des chemins des fichiers .etude produits.
+    Utilise les clés suivantes de config.yaml :
+      - work_dir
+      - input_encoding
+      - output_encoding
+      - sequence_start
+      - copybooks.dir (si copybooks.enabled = true)
     """
-    work_dir = config.get("work_dir", "./work")
+    work_root = config.get("work_dir", "./work")
+    etude_dir = os.path.join(work_root, "etude")
     input_encoding = config.get("input_encoding", "latin-1")
     output_encoding = config.get("output_encoding", "utf-8")
     seq_start = int(config.get("sequence_start", 1))
@@ -154,20 +162,18 @@ def normalize_list_files(source_files: List[str], config: Dict) -> List[str]:
     for src in source_files:
         etude_path = normalize_file(
             input_file=src,
-            work_dir=work_dir,
+            work_dir=etude_dir,
             input_encoding=input_encoding,
             output_encoding=output_encoding,
             seq_start=seq_start,
             copybooks_dir=copybooks_dir,
         )
-        # normalize_file peut retourner None si une erreur est survenue
         if etude_path is not None:
             normalized_paths.append(etude_path)
 
     return normalized_paths
 
 
-# Mode autonome éventuel (optionnel)
 if __name__ == "__main__":
     import sys
 
