@@ -8,13 +8,14 @@ import subprocess
 from pathlib import Path
 import yaml
 
-import clean_dirs
-import list_sources
-import normalize_file
-import program_structure
-import build_data_dictionary
-import scan_variable_usage
-import analyse_structures_logiques  # ← AJOUT
+from ..pipeline import clean_dirs
+from ..pipeline import list_sources
+from ..pipeline import normalize_file
+from ..analysis import program_structure
+from ..data_dictionnary import build_data_dictionary
+from ..data_dictionnary import build_program_dd_and_copybooks
+from ..analysis import scan_variable_usage
+from ..analysis import analyse_structures_logiques  # ← AJOUT
 
 logger = logging.getLogger(__name__)
 
@@ -156,11 +157,11 @@ def run_pipeline(config: dict) -> None:
     )
     logger.info("  %d fichier(s) .etude généré(s)", len(normalized_files))
     
-    import build_program_dd_and_copybooks
+    #import build_program_dd_and_copybooks
 
     # 4) Exploitation .etude pour référentiel COPYBOOK
     dd_paths = build_program_dd_and_copybooks.generate_dd_and_copybooks(config)
-    logging.getLogger(__name__).info("✅ DD générés: %s", dd_paths)
+    logging.info(__name__).info("✅ DD générés: %s", dd_paths)
 
     # 5) Structure des programmes : program_structure.csv
     logger.info("Étape 4/11 – Génération de program_structure.csv (structure des paragraphes)")
@@ -177,82 +178,16 @@ def run_pipeline(config: dict) -> None:
     data_dict_by_program_dir = csv_dir / "dd_by_program"
     data_dict_by_program_dir.mkdir(parents=True, exist_ok=True)
 
-    build_data_dictionary.build_data_dictionaries(
+    build_data_dictionary.build_data_dictionary(
         normalized_files=normalized_files,
         program_structure_csv=program_structure_csv,
         global_dd_path=data_dict_global,
         dd_by_program_dir=data_dict_by_program_dir,
     )
 
-    # 7) Branche DATA – Scan des usages de variables
-    logger.info("Étape 6/11 – Scan des usages de variables (branche DATA – scan_variable_usage)")
-
-    for etude_entry in normalized_files:
-        etude_path = Path(etude_entry)
-        name = etude_path.name
-
-        # Nom du programme sans extensions .cbl.etude / .etude
-        program = name
-        for suffix in [".cbl.etude", ".CBL.ETUDE", ".etude", ".ETUDE"]:
-            if program.endswith(suffix):
-                program = program[: -len(suffix)]
-                break
-
-        logger.info("  Analyse des usages pour le programme %s", program)
-
-        # Dictionnaire de données du programme
-        dd_path = data_dict_by_program_dir / f"{program}_dd.csv"
-        if not dd_path.is_file():
-            logger.warning("    Pas de dictionnaire de données pour %s (fichier %s introuvable)", program, dd_path)
-            continue
-
-        variables = scan_variable_usage.load_dd_file(dd_path)
-        paragraph_ranges = scan_variable_usage.load_paragraph_ranges(program_structure_csv, program)
-
-        # .etude : on utilise le chemin déjà normalisé
-        usages = scan_variable_usage.process_etude(program, variables, paragraph_ranges, etude_path)
-
-        # Écriture du PROGRAM_usage.csv dans csv_dir
-        scan_variable_usage.write_usage_csv(program, usages, csv_dir)
-
-    # 7) Branche DATA – Analyse des structures logiques
-    logger.info("Étape 7/11 – Analyse des structures logiques (branche DATA – analyse_structures_logiques)")
-
-    for etude_entry in normalized_files:
-        etude_path = Path(etude_entry)
-        name = etude_path.name
-
-        program = name
-        for suffix in [".cbl.etude", ".CBL.ETUDE", ".etude", ".ETUDE"]:
-            if program.endswith(suffix):
-                program = program[: -len(suffix)]
-                break
-
-        logger.info("  Structures logiques pour le programme %s", program)
-
-        analyse_structures_logiques.analyse_program(
-            program=program,
-            etude_path=etude_path,
-            csv_dir=csv_dir,
-            program_structure_csv=program_structure_csv,
-        )
-
-    # 8) Rapports Markdown (synthèse par programme)
-    logger.info("Étape 8/11 – Génération des rapports Markdown")
-    # Ici tu appelles ton générateur de rapports markdown par programme
-    # Exemple : report_markdown.make_markdown_report(...)
-
-    # 9) Conversion Markdown -> ODT / DOCX
-    logger.info("Étape 9/11 – Conversion Markdown -> ODT (pandoc)")
-    convert_markdown_to_odt_docx(
-        reports_dir=reports_dir,
-        generate_odt=True,
-        generate_docx=False,
-    )
-
-    # 10) Étape 10 et 11 : réservées pour futures branches (graphes, synthèse globale...)
-    logger.info("Étape 10/11 – (Réservée pour futures analyses : graphes, appels, etc.)")
-    logger.info("Étape 11/11 – Pipeline terminé ✅")
+        # n) Étape n : réservées pour futures branches (graphes, synthèse globale...)
+    logger.info("Étape n – (Réservée pour futures analyses : graphes, appels, etc.)")
+    logger.info("Étape n + 1 – Pipeline terminé ✅")
 
 
 # ============================================================

@@ -6,25 +6,46 @@ normalize_file.py
 -----------------
 Étape 2 : normalisation d'un source COBOL pour analyse.
 
+Objectif (contrat) :
+- Produire des fichiers .etude dans <work_dir>/etude
+- Renumérotation des lignes (col 1-6) à partir de seq_start
+- Conservation de la zone 7-72
+- Filtrage : SMASH, JCL //, commentaires col7='*' (sauf sentinelles COPYBOOK)
+- Expansion des COPYBOOK si copybooks_dir est fourni (avec sentinelles *COPYBOOK / *END COPYBOOK)
+
 Pipeline pour un fichier COBOL :
   1) Lecture du source brut
-  2) Expansion des COPY (avec REPLACING) via copy_expander.expand_copybooks
-  3) Filtrage des lignes inutiles :
-       - lignes SMASH de debugger (texte commençant par 'SMASH' après trim à gauche)
-       - commentaires (col 7 = '*') SAUF les sentinelles *COPYBOOK / *END COPYBOOK
-       - lignes JCL commençant par '//'
-       - lignes vides en zone code (col 8-72)
-  4) Renumérotation des lignes (col 1-6) à partir de seq_start
-  5) Écriture du .cbl.etude dans <work_dir>/etude
+  2) Expansion COPYBOOK (optionnelle)
+  3) Filtrage
+  4) Renumérotation
+  5) Écriture .etude
 """
 
 import os
-from typing import List, Dict, Optional
 import logging
+from typing import List, Dict, Optional
 
-from copy_expander import expand_copybooks
+from .copy_expander import expand_copybooks
 
 logger = logging.getLogger(__name__)
+
+
+def _is_copy_sentinel(line80: str) -> bool:
+    """
+    Retourne True si la ligne (80 colonnes) est une sentinelle COPYBOOK :
+    - *COPYBOOK XXX
+    - *END COPYBOOK XXX
+
+    Hypothèse .etude : col 7 = '*' (index 6).
+    On teste sur col 7-72 (index 6:72) en trim + upper.
+    """
+    if len(line80) < 7:
+        return False
+    if line80[6] != "*":
+        return False
+
+    chunk = line80[6:72].strip().upper()
+    return chunk.startswith("*COPYBOOK ") or chunk.startswith("*END COPYBOOK")
 
 
 def normalize_file(
@@ -38,10 +59,10 @@ def normalize_file(
     """
     Normalise un source COBOL et écrit le .etude dans work_dir.
 
-    Règles importantes :
-      - expansion des COPY avant filtrage
-      - toute ligne dont le texte (après strip à gauche) commence par 'SMASH'
-        est ignorée (lignes de debugger), y compris si elles viennent d'un COPY.
+    Règles :
+      - toute ligne dont le texte (après strip à gauche) commence par 'SMASH' est ignorée
+      - commentaires (col 7 = '*') ignorés SAUF sentinelles *COPYBOOK / *END COPYBOOK
+      - si copybooks_dir est fourni : expansion des COPY via expand_copybooks(...)
     """
     os.makedirs(work_dir, exist_ok=True)
 
@@ -53,30 +74,29 @@ def normalize_file(
         with open(input_file, "r", encoding=input_encoding, errors="ignore") as fin:
             lines = fin.readlines()
     except Exception as e:
-        print(f"[ERREUR] Lecture {input_file} : {e}")
+        logger.error("❌ Lecture %s : %s", input_file, e)
         return None
 
-    # 2) Expansion des COPY (avec REPLACING)
-    try:
-        lines = expand_copybooks(lines, copybooks_dir)
-    except Exception as e:
-        msg = f"[WARNING] Échec du développement des COPY pour {input_file} : {e}"
-        print(msg)
-        logger.warning(msg)
+    # 2) Expansion COPYBOOK si configurée
+    if copybooks_dir:
+        # Fail-fast : si copybooks_dir est fourni, on produit un .etude EXPANDÉ
+        lines = expand_copybooks(lines, copybooks_dir, encoding=input_encoding)
+        logger.info("✅ Expansion COPY activée : %s (dir=%s)", input_file, copybooks_dir)
+    else:
+        logger.info("ℹ️ Expansion COPY désactivée (copybooks_dir non fourni) : %s", input_file)
 
     out_lines: List[str] = []
     seq = seq_start
 
     # 3) Filtrage + renumérotation
     for raw in lines:
-        # On enlève seulement le \n de fin
         raw_line = raw.rstrip("\n")
 
-        # 🔹 Filtre global SMASH (avant tout, sur le texte brut après trim à gauche)
+        # Filtre global SMASH
         if raw_line.lstrip().startswith("SMASH"):
             continue
 
-        # On travaille sur 80 colonnes fixes
+        # On force 80 colonnes
         line = raw_line
         if len(line) < 80:
             line = line.ljust(80)
@@ -88,16 +108,8 @@ def normalize_file(
             continue
 
         # Gestion des commentaires / sentinelles
-        # Colonne 7 => index 6
         indicator = line[6] if len(line) > 6 else " "
-
-        is_sent = False
-        if indicator == "*":
-            # zone col 7-72 pour tester *COPYBOOK / *END COPYBOOK
-            code_with_star = line[6:72]  # col 7-72 (inclut '*')
-            stripped = code_with_star.strip().upper()
-            if stripped.startswith("*COPYBOOK ") or stripped.startswith("*END COPYBOOK"):
-                is_sent = True
+        is_sent = _is_copy_sentinel(line)
 
         if indicator == "*" and not is_sent:
             # vrai commentaire à ignorer
@@ -106,33 +118,31 @@ def normalize_file(
         # Zone code : colonnes 8-72
         code_area = line[7:72].strip()
         if code_area == "":
-            # ligne vide en zone code
             continue
 
-        # Colonnes 1-6 : nouveau numéro de séquence
+        # Renumérotation col 1-6
         seq_str = f"{seq:06d}"
 
-        # Colonnes 7-72 : on garde l'existant
-        middle = line[6:72]   # index 6 = col7, index 71 = col72
+        # Col 7-72 conservées
+        middle = line[6:72]
 
-        # Colonnes 73-80 : espaces
+        # Col 73-80 : espaces
         new_line = seq_str + middle + " " * 8 + "\n"
-
         out_lines.append(new_line)
-        seq += 1
 
+        seq += 1
         if seq > 999999:
-            print(f"[WARN] {input_file} : plus de 999999 lignes, arrêt.")
+            logger.warning("[WARN] %s : plus de 999999 lignes, arrêt.", input_file)
             break
 
-    # 4) Écriture du .etude
+    # 4) Écriture .etude
     try:
         with open(output_file, "w", encoding=output_encoding, errors="ignore") as fout:
             fout.writelines(out_lines)
-        print(f"[OK] Normalisé : {output_file}")
+        logger.info("✅ Normalisé : %s", output_file)
         return output_file
     except Exception as e:
-        print(f"[ERREUR] Écriture {output_file} : {e}")
+        logger.error("❌ Écriture %s : %s", output_file, e)
         return None
 
 
@@ -140,20 +150,22 @@ def normalize_list_files(source_files: List[str], config: Dict) -> List[str]:
     """
     Normalise une liste de fichiers COBOL "bruts" en fichiers .etude.
 
-    Utilise les clés suivantes de config.yaml :
+    Clés config.yaml utilisées :
       - work_dir
       - input_encoding
       - output_encoding
       - sequence_start
-      - copybooks.dir (si copybooks.enabled = true)
+      - copybooks.enabled
+      - copybooks.dir
     """
     work_root = config.get("work_dir", "./work")
     etude_dir = os.path.join(work_root, "etude")
+
     input_encoding = config.get("input_encoding", "latin-1")
     output_encoding = config.get("output_encoding", "utf-8")
     seq_start = int(config.get("sequence_start", 1))
 
-    copybooks_cfg = config.get("copybooks", {})
+    copybooks_cfg = config.get("copybooks", {}) or {}
     copybooks_enabled = copybooks_cfg.get("enabled", True)
     copybooks_dir = copybooks_cfg.get("dir") if copybooks_enabled else None
 
