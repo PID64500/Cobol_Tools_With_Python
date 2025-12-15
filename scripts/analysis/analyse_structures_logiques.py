@@ -1,301 +1,240 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 analyse_structures_logiques.py
-------------------------------
 
-À partir de :
-  - d'un CSV dictionnaire (build_data_dictionary.py)
-  - d'un CSV d'usage des variables (scan_variable_usage.py)
+Analyse logique des structures de données COBOL à partir :
+- du dictionnaire de données par programme (dd_by_program/<PGM>_dd.csv)
+- des usages variables détectés (csv/<PGM>_usage.csv)
 
-Produit :
-  - un CSV "structures_logiques" avec une ligne par structure racine (01/05),
-    résumant la taille et l'utilisation du bloc de données.
+Sortie :
+- un CSV synthétique par programme : csv/structures_logiques/structures_logiques_<PGM>.csv
 
-Usage :
-  python analyse_structures_logiques.py prog_dd.csv prog_usage.csv --out prog_structures.csv
+Correctif V3+ :
+- déduction du parent via full_path (avant le dernier '/')
+- parcours itératif + visited => pas de RecursionError, pas de boucles
+- auto-détection séparateur ';' ou ','
+- dédoublonnage des usages par line_etude
+- 2 compteurs :
+    * usages_root_only : usages du seul noeud racine (comparable à Notepad si tu cherches le nom du 01)
+    * usages_structure : usages cumulés (racine + descendants)
 """
 
-import argparse
-import csv
 from pathlib import Path
-from typing import Dict, List
+import csv
+import argparse
+from collections import defaultdict
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Analyse les structures logiques (blocs racines) d'un programme COBOL."
-    )
-    parser.add_argument(
-        "dict_csv",
-        help="CSV dictionnaire (sortie de build_data_dictionary.py)"
-    )
-    parser.add_argument(
-        "usage_csv",
-        help="CSV usage (sortie de scan_variable_usage.py)"
-    )
-    parser.add_argument(
-        "--out",
-        default="structures_logiques.csv",
-        help="CSV de sortie (défaut : structures_logiques.csv)",
-    )
-    return parser.parse_args()
+# ============================================================
+#   Chargement CSV (auto-détection séparateur)
+# ============================================================
+
+def _detect_delimiter(sample: str) -> str:
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=";,")
+        return dialect.delimiter
+    except Exception:
+        return ";" if sample.count(";") >= sample.count(",") else ","
 
 
-def load_csv(path: Path) -> List[Dict[str, str]]:
-    rows: List[Dict[str, str]] = []
-    with path.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rows.append(row)
-    return rows
+def load_csv(path: Path) -> list[dict]:
+    with path.open(encoding="utf-8", newline="") as f:
+        sample = f.read(4096)
+        f.seek(0)
+        delim = _detect_delimiter(sample)
+        reader = csv.DictReader(f, delimiter=delim)
+        return list(reader)
 
 
-def index_usage(usage_rows: List[Dict[str, str]]) -> Dict[str, Dict[str, str]]:
-    """
-    Indexe les infos d'usage par "variable" (colonne du *_usage.csv).
+# ============================================================
+#   Index usages (tolérant aux noms de colonnes)
+# ============================================================
 
-    Le fichier *_usage.csv produit par scan_variable_usage.py contient
-    les colonnes :
-
-        variable, usage_type, paragraph, line_etude, context_usage_final
-
-    Ici on regroupe par "variable" (qui correspond à full_path si disponible,
-    sinon à name) et on calcule :
-
-        used             : "Y" si au moins un usage existe
-        usage_count      : nombre total d'occurrences
-        first_usage_line : plus petit numéro de line_etude non vide
-    """
-    index: Dict[str, Dict[str, str]] = {}
-
-    for r in usage_rows:
-        var = (r.get("variable") or "").strip().upper()
-        if not var:
-            continue
-
-        line = (r.get("line_etude") or "").strip()
-
-        stats = index.get(var)
-        if not stats:
-            stats = {
-                "used": "Y",
-                "usage_count": "0",
-                "first_usage_line": "",
-            }
-            index[var] = stats
-
-        # Incrémenter le compteur
-        try:
-            cur = int(stats["usage_count"] or "0")
-        except ValueError:
-            cur = 0
-        stats["usage_count"] = str(cur + 1)
-
-        # Mettre à jour la première ligne d'utilisation
-        if line:
-            if not stats["first_usage_line"]:
-                stats["first_usage_line"] = line
-            else:
-                old_line = stats["first_usage_line"]
-                try:
-                    old_val = int(old_line)
-                    new_val = int(line)
-                    if new_val < old_val:
-                        stats["first_usage_line"] = line
-                except ValueError:
-                    # Si comparaison numérique impossible, on garde la première
-                    pass
-
+def index_usage(usage_rows: list[dict]) -> dict:
+    index = defaultdict(list)
+    for row in usage_rows:
+        var = (row.get("variable") or row.get("full_path") or row.get("name") or "").strip()
+        if var:
+            index[var].append(row)
     return index
 
 
-def enrich_dict_with_usage(
-    dict_rows: List[Dict[str, str]],
-    usage_index: Dict[str, Dict[str, str]],
-) -> None:
+def _usage_lines(usages: list[dict]) -> set[str]:
     """
-    Ajoute les colonnes d'usage (used, usage_count, first_usage_line)
-    dans les lignes du dictionnaire, à partir de l'index usage.
-
-    La clé de jointure est :
-
-        variable_key = full_path.upper() si présent, sinon name.upper()
-
-    qui doit correspondre à la colonne "variable" du *_usage.csv.
+    Retourne l'ensemble des line_etude (ou line) uniques pour une liste d'usages.
+    -> 1 ligne = 1 utilisation (définition alignée "Notepad = lignes")
     """
-    for e in dict_rows:
-        full_path = (e.get("full_path") or "").strip()
-        name = (e.get("name") or "").strip()
-
-        if full_path:
-            key = full_path.upper()
-        else:
-            key = name.upper()
-
-        stats = usage_index.get(key)
-        if stats:
-            e["used"] = stats.get("used", "Y")  # si présent dans usage → Y
-            e["usage_count"] = stats.get("usage_count", "0")
-            e["first_usage_line"] = stats.get("first_usage_line", "")
-        else:
-            # Par défaut, si pas trouvé dans usage
-            e.setdefault("used", "N")
-            e.setdefault("usage_count", "0")
-            e.setdefault("first_usage_line", "")
+    s = set()
+    for u in usages:
+        v = (u.get("line_etude") or u.get("line") or "").strip()
+        if v:
+            s.add(v)
+    return s
 
 
-def is_root_structure(e: Dict[str, str]) -> bool:
+def enrich_dict_with_usage(dict_rows: list[dict], usage_index: dict) -> None:
+    for row in dict_rows:
+        full_path = (row.get("full_path") or "").strip()
+        name = (row.get("name") or "").strip()
+
+        # On prend full_path si possible, sinon name.
+        # IMPORTANT : on dédoublonne ensuite par line_etude.
+        usages = usage_index.get(full_path) or usage_index.get(name) or []
+
+        ulines = _usage_lines(usages)
+        row["_usage_lines"] = ulines  # set[str]
+        row["_usage_count"] = len(ulines)
+        row["_first_usage_line"] = min(ulines) if ulines else ""
+
+
+# ============================================================
+#   Arbre via full_path (anti-ambigüité FILLER)
+# ============================================================
+
+def _node_id(row: dict) -> str:
+    # full_path doit être unique
+    fp = (row.get("full_path") or "").strip()
+    if fp:
+        return fp
+    # fallback (rare) : name seul
+    return (row.get("name") or "").strip()
+
+
+def _parent_id(node_id: str) -> str:
+    # Parent = chemin avant le dernier "/"
+    if "/" in node_id:
+        return node_id.rsplit("/", 1)[0]
+    return ""
+
+
+def build_children_index(dict_rows: list[dict]) -> tuple[dict, dict]:
     """
-    Détermine si une entrée du dictionnaire est une 'structure racine'.
-
-    Règle V1 :
-      - level = 01 ou 05
-      - parent_name vide
+    Retourne :
+    - children_index[parent_id] -> [child_row, ...]
+    - rows_by_id[node_id] -> row
     """
-    level = (e.get("level") or "").strip()
-    parent = (e.get("parent_name") or "").strip()
-    if parent:
-        return False
-    return level in ("01", "05")
+    children_index = defaultdict(list)
+    rows_by_id = {}
+
+    for row in dict_rows:
+        nid = _node_id(row)
+        if not nid:
+            continue
+        rows_by_id[nid] = row
+        pid = _parent_id(nid)
+        children_index[pid].append(row)
+
+    return children_index, rows_by_id
 
 
-def analyse_structures(dict_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+# ============================================================
+#   Analyse structures (itératif)
+# ============================================================
+
+def collect_subtree_iter(root_id: str, children_index: dict) -> list[dict]:
     """
-    Analyse les structures à partir du dictionnaire enrichi.
-
-    dict_rows : lignes du dictionnaire enrichies avec :
-      - used
-      - usage_count
-      - first_usage_line
-
-    Sortie : une liste de dicts avec colonnes :
-      program, section, source, root_name, level, full_path,
-      nb_children, nb_children_used, has_occurs, has_88,
-      used, usage_count_total, first_usage_line
+    Récupère tous les descendants d'une structure root_id (full_path),
+    en itératif, avec visited pour éviter boucles.
     """
-    results: List[Dict[str, str]] = []
+    collected = []
+    visited = set()
+    stack = list(children_index.get(root_id, []))
 
-    # On peut traiter plusieurs programmes dans un même CSV,
-    # donc on ne suppose pas un programme unique.
-    for root in dict_rows:
-        if not is_root_structure(root):
+    while stack:
+        node = stack.pop()
+        nid = _node_id(node)
+        if not nid:
+            continue
+        if nid in visited:
+            continue
+        visited.add(nid)
+
+        collected.append(node)
+        stack.extend(children_index.get(nid, []))
+
+    return collected
+
+
+def analyse_structures(dict_rows: list[dict]) -> list[dict]:
+    structures = []
+    children_index, _ = build_children_index(dict_rows)
+
+    for row in dict_rows:
+        level = (row.get("level") or "").strip()
+        nid = _node_id(row)
+        if not nid:
             continue
 
-        program = root.get("program", "")
-        section = root.get("section", "")
-        source = root.get("source", "")
-        root_name = root.get("name", "")
-        level = root.get("level", "")
-        root_fp = root.get("full_path") or root_name
+        # Racine = pas de parent (pas de "/") OU parent_id vide
+        pid = _parent_id(nid)
 
-        # Collecter tous les descendants (y compris la racine)
-        descendants: List[Dict[str, str]] = []
-        for e in dict_rows:
-            if (e.get("program", "") != program) or (e.get("section", "") != section):
-                continue
-            fp = e.get("full_path") or e.get("name", "")
-            if fp == root_fp or fp.startswith(root_fp + "/"):
-                descendants.append(e)
+        # On garde 01 et 05 en racines (comme ton script actuel)
+        if level not in {"01", "05"}:
+            continue
+        if pid != "":
+            continue
 
-        # Séparer racine / enfants
-        children = [
-            e for e in descendants
-            if (e.get("full_path") or e.get("name", "")) != root_fp
-        ]
+        subtree = collect_subtree_iter(nid, children_index)
+        all_nodes = [row] + subtree
 
-        nb_children = len(children)
-        nb_children_used = sum(
-            1 for e in children if (e.get("used") or "N") == "Y"
-        )
+        # usages_root_only : comparable à une recherche Notepad sur le nom du 01/05
+        root_lines = set(row.get("_usage_lines") or set())
 
-        has_occurs = any((e.get("occurs") or "").strip() for e in descendants)
-        has_88 = any((e.get("level") or "").strip() == "88" for e in descendants)
+        # usages_structure : cumul racine + descendants (dédoublonné par line_etude)
+        struct_lines = set()
+        for n in all_nodes:
+            struct_lines |= set(n.get("_usage_lines") or set())
 
-        # Agrégation des usages
-        total_usage = 0
-        first_usage_line = ""
-
-        for e in descendants:
-            try:
-                cnt = int(e.get("usage_count", "0") or "0")
-            except ValueError:
-                cnt = 0
-            total_usage += cnt
-
-            # On prend la plus petite ligne non vide comme "première utilisation"
-            line = (e.get("first_usage_line") or "").strip()
-            if line:
-                if not first_usage_line:
-                    first_usage_line = line
-                else:
-                    try:
-                        cur = int(first_usage_line)
-                        new = int(line)
-                        if new < cur:
-                            first_usage_line = line
-                    except ValueError:
-                        # Au pire, on garde la première trouvée
-                        pass
-
-        result = {
-            "program": program,
-            "section": section,
-            "source": source,
-            "root_name": root_name,
+        structures.append({
+            "structure": nid,  # full_path
             "level": level,
-            "full_path": root_fp,
-            "nb_children": str(nb_children),
-            "nb_children_used": str(nb_children_used),
-            "has_occurs": "Y" if has_occurs else "N",
-            "has_88": "Y" if has_88 else "N",
-            "used": "Y" if total_usage > 0 else "N",
-            "usage_count_total": str(total_usage),
-            "first_usage_line": first_usage_line,
-        }
+            "nb_elements": len(all_nodes),
+            "usages_root_only": len(root_lines),
+            "usages_structure": len(struct_lines),
+            "has_occurs": any((n.get("occurs") or "").strip() for n in all_nodes),
+            "has_level_88": any((n.get("level") or "").strip() == "88" for n in all_nodes),
+            "first_usage_line": min(
+                (n.get("_first_usage_line") for n in all_nodes if (n.get("_first_usage_line") or "").strip()),
+                default=""
+            ),
+        })
 
-        results.append(result)
-
-    return results
+    return structures
 
 
-def write_structures_csv(structures: List[Dict[str, str]], out_path: Path) -> None:
-    fieldnames = [
-        "program",
-        "section",
-        "source",
-        "root_name",
+# ============================================================
+#   Écriture CSV
+# ============================================================
+
+def write_structures_csv(structures: list[dict], out_csv: Path) -> None:
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    fields = [
+        "structure",
         "level",
-        "full_path",
-        "nb_children",
-        "nb_children_used",
+        "nb_elements",
+        "usages_root_only",
+        "usages_structure",
         "has_occurs",
-        "has_88",
-        "used",
-        "usage_count_total",
+        "has_level_88",
         "first_usage_line",
     ]
 
-    with out_path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+    with out_csv.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, delimiter=";")
         writer.writeheader()
-        for r in structures:
-            writer.writerow(r)
+        writer.writerows(structures)
 
 
-def main() -> int:
-    args = parse_args()
-    dict_csv_path = Path(args.dict_csv)
-    usage_csv_path = Path(args.usage_csv)
-    out_csv_path = Path(args.out)
+# ============================================================
+#   API PIPELINE
+# ============================================================
 
-    if not dict_csv_path.exists():
-        print(f"[ERREUR] Dictionnaire introuvable : {dict_csv_path}")
-        return 1
-    if not usage_csv_path.exists():
-        print(f"[ERREUR] Fichier d'usage introuvable : {usage_csv_path}")
-        return 1
-
+def analyse_structures_logiques(
+    dict_csv_path: Path,
+    usage_csv_path: Path,
+    out_csv_path: Path,
+) -> Path:
     dict_rows = load_csv(dict_csv_path)
     usage_rows = load_csv(usage_csv_path)
 
@@ -305,9 +244,22 @@ def main() -> int:
     structures = analyse_structures(dict_rows)
     write_structures_csv(structures, out_csv_path)
 
-    print(f"[OK] Structures logiques générées dans : {out_csv_path}")
-    return 0
+    return out_csv_path
+
+
+# ============================================================
+#   CLI
+# ============================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="Analyse des structures logiques COBOL")
+    parser.add_argument("dict_csv", type=Path)
+    parser.add_argument("usage_csv", type=Path)
+    parser.add_argument("--out", type=Path, required=True)
+    args = parser.parse_args()
+
+    analyse_structures_logiques(args.dict_csv, args.usage_csv, args.out)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

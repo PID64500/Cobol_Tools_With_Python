@@ -14,8 +14,8 @@ from ..pipeline import normalize_file
 from ..analysis import program_structure
 from ..data_dictionnary import build_data_dictionary
 from ..data_dictionnary import build_program_dd_and_copybooks
-from ..analysis import scan_variable_usage
-from ..analysis import analyse_structures_logiques  # ← AJOUT
+from ..analysis import scan_variable_usage  # ← brique intégrée via appel direct
+from ..analysis import analyse_structures_logiques  # ← nouvelle brique
 
 logger = logging.getLogger(__name__)
 
@@ -27,15 +27,6 @@ logger = logging.getLogger(__name__)
 def load_config(config_path: Path) -> dict:
     """
     Charge le fichier config.yaml et renvoie un dict.
-
-    On attend typiquement une structure :
-
-    source_dir: "..."
-    work_dir:   "..."
-    output_dir: "..."
-
-    logging:
-      level: INFO
     """
     if not config_path.is_file():
         raise FileNotFoundError(f"Fichier de configuration introuvable : {config_path}")
@@ -76,10 +67,8 @@ def convert_markdown_to_odt_docx(
 ) -> None:
     """
     Parcourt reports_dir, et pour chaque .md :
-
       - génère un .odt si generate_odt = True
       - génère un .docx si generate_docx = True
-
     en utilisant pandoc.
     """
     for md_file in sorted(reports_dir.glob("*.md")):
@@ -109,20 +98,27 @@ def convert_markdown_to_odt_docx(
 
 
 # ============================================================
+#   Helpers spécifiques pipeline
+# ============================================================
+
+def _program_from_usage_filename(usage_path: Path) -> str | None:
+    """
+    Extrait le nom de programme depuis un fichier usage nommé: XXXXXXXX_usage.csv
+    """
+    name = usage_path.name
+    suffix = "_usage.csv"
+    if not name.endswith(suffix):
+        return None
+    return name[: -len(suffix)].strip() or None
+
+
+# ============================================================
 #   Pipeline principal
 # ============================================================
 
 def run_pipeline(config: dict) -> None:
     """
     Orchestration complète du pipeline, étape par étape.
-
-    On s'appuie sur la config YAML, typiquement :
-
-    source_dir: "C:/.../sources_cobol"
-    work_dir:   "C:/.../cobol_tools_files/cobol_work"
-    output_dir: "C:/.../cobol_tools_files/reports"
-
-    + section logging (déjà gérée avant l'appel).
     """
 
     source_dir = Path(config["source_dir"]).resolve()
@@ -132,6 +128,7 @@ def run_pipeline(config: dict) -> None:
     etude_dir = work_dir / "etude"
     csv_dir = work_dir / "csv"
     csv_dir.mkdir(parents=True, exist_ok=True)
+
     reports_dir = output_dir
     reports_dir.mkdir(parents=True, exist_ok=True)
 
@@ -156,24 +153,20 @@ def run_pipeline(config: dict) -> None:
         config=config,
     )
     logger.info("  %d fichier(s) .etude généré(s)", len(normalized_files))
-    
-    #import build_program_dd_and_copybooks
 
-    # 4) Exploitation .etude pour référentiel COPYBOOK
+    # 4) Exploitation .etude pour référentiel COPYBOOK + DD program/copybooks
+    logger.info("Étape 4/11 – Génération DD programme + référentiel COPYBOOK")
     dd_paths = build_program_dd_and_copybooks.generate_dd_and_copybooks(config)
-    logging.info(__name__).info("✅ DD générés: %s", dd_paths)
+    logger.info("✅ DD générés : %s", dd_paths)
 
     # 5) Structure des programmes : program_structure.csv
-    logger.info("Étape 4/11 – Génération de program_structure.csv (structure des paragraphes)")
-
+    logger.info("Étape 5/11 – Génération de program_structure.csv (structure des paragraphes)")
     program_structure_csv = program_structure.generate_program_structure(work_dir)
-
     logger.info("  program_structure.csv généré : %s", program_structure_csv)
 
     # 6) Branche DATA – Construction des dictionnaires de données
-    logger.info("Étape 5/11 – Construction des dictionnaires de données (branche DATA – build_data_dictionary)")
+    logger.info("Étape 6/11 – Construction des dictionnaires de données (build_data_dictionary)")
 
-    # Exemple : un dictionnaire global, et un dictionnaire par programme
     data_dict_global = csv_dir / "data_dictionary_global.csv"
     data_dict_by_program_dir = csv_dir / "dd_by_program"
     data_dict_by_program_dir.mkdir(parents=True, exist_ok=True)
@@ -185,7 +178,53 @@ def run_pipeline(config: dict) -> None:
         dd_by_program_dir=data_dict_by_program_dir,
     )
 
-        # n) Étape n : réservées pour futures branches (graphes, synthèse globale...)
+    # 7) Scan des usages variables – appel direct
+    logger.info("Étape 7/11 – Scan des usages de variables (scan_variable_usage)")
+
+    usage_outputs = scan_variable_usage.scan_variable_usage(
+        normalized_files=normalized_files,
+        work_dir=str(work_dir),
+        dd_by_program_dir=str(data_dict_by_program_dir),
+        program_structure_csv=str(program_structure_csv),
+    )
+
+    logger.info("  %d fichier(s) usage généré(s)", len(usage_outputs))
+
+    # 8) Analyse des structures logiques – 1 fichier par programme
+    logger.info("Étape 8/11 – Analyse des structures logiques (analyse_structures_logiques)")
+
+    structures_dir = csv_dir / "structures_logiques"
+    structures_dir.mkdir(parents=True, exist_ok=True)
+
+    structures_outputs: list[Path] = []
+
+    for usage_csv in usage_outputs:
+        usage_csv = Path(usage_csv)
+        prog = _program_from_usage_filename(usage_csv)
+        if not prog:
+            logger.warning("  usage ignoré (nom inattendu) : %s", usage_csv.name)
+            continue
+
+        dict_csv = data_dict_by_program_dir / f"{prog}_dd.csv"
+        if not dict_csv.is_file():
+            logger.error("  DD manquant pour %s : %s", prog, dict_csv)
+            continue
+
+        out_csv = structures_dir / f"structures_logiques_{prog}.csv"
+
+        try:
+            analyse_structures_logiques.analyse_structures_logiques(
+                dict_csv_path=dict_csv,
+                usage_csv_path=usage_csv,
+                out_csv_path=out_csv,
+            )
+            structures_outputs.append(out_csv)
+        except Exception as e:
+            logger.exception("  Erreur structures logiques %s : %s", prog, e)
+
+    logger.info("  %d fichier(s) structures logiques généré(s)", len(structures_outputs))
+
+    # n) Étape n : réservées pour futures branches (graphes, synthèse globale...)
     logger.info("Étape n – (Réservée pour futures analyses : graphes, appels, etc.)")
     logger.info("Étape n + 1 – Pipeline terminé ✅")
 
