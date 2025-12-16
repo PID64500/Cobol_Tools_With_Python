@@ -24,3 +24,6 @@ cobol_work/
 
 # Autres caches
 .cache/
+
+# Exceptions – CSV de configuration versionnés
+!config/**/*.csv

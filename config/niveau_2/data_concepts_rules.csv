@@ -1,0 +1,31 @@
+priority;match_type;pattern;concept;comment
+1;contains;DUMP;TRACE_DIAGNOSTIC;Dump/diagnostic
+2;contains;ABEND;TRACE_DIAGNOSTIC;Abend/anomalie
+3;contains;ANOM;TRACE_DIAGNOSTIC;Anomalie
+4;contains;RACF;AUTORISATION_SECURITE;Sécurité RACF
+5;contains;AUTOR;AUTORISATION_SECURITE;Autorisation
+6;contains;HABIL;AUTORISATION_SECURITE;Habilitation
+7;contains;DROIT;AUTORISATION_SECURITE;Droits
+8;contains;MAP;NAVIGATION_IHM;BMS map/mapset
+9;contains;PF;NAVIGATION_IHM;Touches PF
+10;contains;MSG;NAVIGATION_IHM;Messages écran
+11;contains;CURS;NAVIGATION_IHM;Curseur
+12;contains;TRMID;SESSION_TERMINAL;Terminal
+13;contains;TERM;SESSION_TERMINAL;Terminal/session
+14;contains;ECRAN;SESSION_TERMINAL;Contexte écran
+15;contains;PAG;SESSION_TERMINAL;Pagination
+16;contains;USER;IDENTITE;Identité
+17;contains;IDENT;IDENTITE;Identité
+18;contains;NOM;IDENTITE;Nom
+19;contains;MATR;IDENTITE;Matricule
+20;contains;CONST;PARAMETRAGE_REFERENCE;Constantes
+21;contains;REF;PARAMETRAGE_REFERENCE;Référentiel
+22;contains;PARAM;PARAMETRAGE_REFERENCE;Paramétrage
+23;contains;CODE;PARAMETRAGE_REFERENCE;Code/référence (à confirmer)
+24;contains;LIB;PARAMETRAGE_REFERENCE;Libellé (à confirmer)
+25;contains;RESP;TECHNIQUE_CONTROLE;EIBRESP/RESP
+26;contains;RETOUR;TECHNIQUE_CONTROLE;Codes retour
+27;contains;RC;TECHNIQUE_CONTROLE;Return code
+28;contains;ERR;TECHNIQUE_CONTROLE;Erreur technique
+29;contains;EIB;TECHNIQUE_CONTROLE;Champs CICS EIB
+30;contains;DFH;TECHNIQUE_CONTROLE;Champs CICS DFH

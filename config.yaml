@@ -34,6 +34,9 @@ copybooks:
   dir: "C:/Users/Utilisateur/Documents/Workplace/cobol_tools_files/cobol_copy"
   enabled: true
 
+# Ficher de règles du niveau 2 d'analyse des données
+data_concepts_rules_csv: "ressources/niveau_2/data_concepts_rules.csv"
+
 # Extensions considérées comme sources COBOL
 source_extensions:
   - ".cbl"

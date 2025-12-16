@@ -22,6 +22,7 @@ from ..analysis import scan_unused_variables  # ← Niveau 1.1 variables inutili
 from ..analysis import analyse_redefines_dangereux  # ← Niveau 1.2 REDEFINES dangereux
 from ..analysis import analyse_occurs_inutilises  # ← Niveau 1.3 OCCURS non utilisés
 from ..analysis import analyse_niveaux_cobol  # ← Niveau 1.4 anomalies niveaux COBOL
+from ..data import data_concepts_usage  # ← Niveau 2.1 concepts de données (pivot transverse)
 
 logger = logging.getLogger(__name__)
 
@@ -405,6 +406,30 @@ def run_pipeline(config: dict) -> None:
             logger.exception("  Erreur niveaux %s : %s", prog, e)
 
     logger.info("  %d fichier(s) anomalies niveaux généré(s)", nb_lvl)
+
+
+    # 14) Niveau 2.1 – Concepts de données (pivot transverse)
+    logger.info("Étape 14/14 – Analyse des concepts de données (data_concepts_usage)")
+
+    # Où trouver les règles (fichier CSV versionné dans le repo)
+    rules_csv = Path(config.get("data_concepts_rules_csv", "resources/niveau2/data_concepts_rules.csv")).resolve()
+
+    concepts_dir = csv_dir / "data_concepts"
+    concepts_dir.mkdir(parents=True, exist_ok=True)
+
+    out_csv = concepts_dir / "data_concepts_usage.csv"
+
+    try:
+        data_concepts_usage.build_data_concepts_usage(
+            dd_global_csv=data_dict_global,
+            usage_csv_dir=csv_dir,
+            rules_csv=rules_csv,
+            out_csv=out_csv,
+        )
+        logger.info("  data_concepts_usage : %s", out_csv)
+        logger.info("  data_concepts_rules : %s", rules_csv)
+    except Exception as e:
+        logger.exception("  Erreur data_concepts_usage : %s", e)
 
 # n) Étape n : réservées pour futures branches (graphes, synthèse globale...)
     logger.info("Pipeline terminé ✅")
