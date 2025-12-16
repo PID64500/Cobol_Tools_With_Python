@@ -5,6 +5,7 @@ main.py – Orchestration du pipeline d'analyse COBOL
 import sys
 import logging
 import subprocess
+import csv
 from pathlib import Path
 import yaml
 
@@ -15,7 +16,9 @@ from ..analysis import program_structure
 from ..data_dictionnary import build_data_dictionary
 from ..data_dictionnary import build_program_dd_and_copybooks
 from ..analysis import scan_variable_usage  # ← brique intégrée via appel direct
-from ..analysis import analyse_structures_logiques  # ← nouvelle brique
+from ..analysis import analyse_structures_logiques  # ← brique intégrée
+from ..analysis import analyse_variables_critiques  # ← nouvelle brique
+from ..analysis import scan_unused_variables  # ← Niveau 1.1 variables inutilisées
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +57,38 @@ def setup_logging(log_level: str | int = "INFO") -> None:
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+
+def _load_csv_dict_rows(csv_path: Path) -> list[dict]:
+    """
+    Charge un CSV en liste de dict (DictReader).
+    """
+    rows: list[dict] = []
+    with csv_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            rows.append(r)
+    return rows
+
+
+def _write_csv_rows(rows: list[dict], out_csv: Path) -> None:
+    """
+    Écrit une liste de dict dans un CSV.
+    """
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    if not rows:
+        # crée quand même un fichier vide (optionnel)
+        out_csv.write_text("", encoding="utf-8")
+        return
+
+    # Union des clés pour éviter de perdre des colonnes si certains dict diffèrent
+    fieldnames = sorted({k for r in rows for k in r.keys()})
+
+    with out_csv.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
 
 
 # ============================================================
@@ -157,7 +192,7 @@ def run_pipeline(config: dict) -> None:
     # 4) Exploitation .etude pour référentiel COPYBOOK + DD program/copybooks
     logger.info("Étape 4/11 – Génération DD programme + référentiel COPYBOOK")
     dd_paths = build_program_dd_and_copybooks.generate_dd_and_copybooks(config)
-    logger.info("✅ DD générés : %s", dd_paths)
+    logger.info("✅ DD générés : %s", {k: str(v) for k, v in dd_paths.items()})
 
     # 5) Structure des programmes : program_structure.csv
     logger.info("Étape 5/11 – Génération de program_structure.csv (structure des paragraphes)")
@@ -224,9 +259,74 @@ def run_pipeline(config: dict) -> None:
 
     logger.info("  %d fichier(s) structures logiques généré(s)", len(structures_outputs))
 
-    # n) Étape n : réservées pour futures branches (graphes, synthèse globale...)
-    logger.info("Étape n – (Réservée pour futures analyses : graphes, appels, etc.)")
-    logger.info("Étape n + 1 – Pipeline terminé ✅")
+    # 9) Analyse des variables critiques – 1 fichier par programme
+    logger.info("Étape 9/11 – Analyse des variables critiques (analyse_variables_critiques)")
+
+    variables_critiques_dir = csv_dir / "variables_critiques"
+    variables_critiques_dir.mkdir(parents=True, exist_ok=True)
+
+    nb_varcrit = 0
+
+    for etude_path in normalized_files:
+        etude_path = Path(etude_path)
+        prog = etude_path.name.split(".")[0].upper()
+
+        usage_csv = csv_dir / f"{prog}_usage.csv"
+        if not usage_csv.is_file():
+            logger.error("  Usage manquant pour %s : %s", prog, usage_csv)
+            continue
+
+        dict_csv = data_dict_by_program_dir / f"{prog}_dd.csv"
+        if not dict_csv.is_file():
+            logger.error("  DD manquant pour %s : %s", prog, dict_csv)
+            continue
+
+        out_csv = variables_critiques_dir / f"{prog}_variables_critiques.csv"
+
+        try:
+            usage_rows = analyse_variables_critiques.load_usage(usage_csv)
+            dd_rows = _load_csv_dict_rows(dict_csv)
+
+            # ✅ Appel normal (probable) : dd_rows est itérable, usage_rows aussi
+            try:
+                rows = analyse_variables_critiques.build_variables_critiques(dd_rows, usage_rows)
+            except TypeError:
+                # 🔁 Fallback si ta signature attend (etude_path, dd_rows, usage_rows)
+                rows = analyse_variables_critiques.build_variables_critiques(etude_path, dd_rows, usage_rows)
+
+            _write_csv_rows(rows, out_csv)
+            nb_varcrit += 1
+        except Exception as e:
+            logger.exception("  Erreur variables critiques %s : %s", prog, e)
+
+    logger.info("  %d fichier(s) variables critiques généré(s)", nb_varcrit)
+
+
+    # 10) Niveau 1.1 – Détection des variables inutilisées (scan_unused_variables)
+    logger.info("Étape 10/11 – Détection des variables inutilisées (scan_unused_variables)")
+
+    try:
+        out_info = scan_unused_variables.scan_unused_variables(
+            csv_dir=csv_dir,
+            dd_by_program_dir=data_dict_by_program_dir,
+        )
+
+        global_path = out_info.get("global")
+        by_program = out_info.get("by_program", {}) or {}
+
+        logger.info("  unused global     : %s", global_path)
+        logger.info("  unused by_program : %d fichier(s) généré(s)", len(by_program))
+
+        # Détail uniquement en DEBUG (évite de polluer un log INFO)
+        for prog, path in sorted(by_program.items()):
+            logger.debug("    %s -> %s", prog, path)
+
+    except Exception as e:
+        logger.exception("  Erreur scan_unused_variables : %s", e)
+
+# n) Étape n : réservées pour futures branches (graphes, synthèse globale...)
+    logger.info("Étape 11/11 – (Réservée pour futures analyses : graphes, appels, etc.)")
+    logger.info("Pipeline terminé ✅")
 
 
 # ============================================================

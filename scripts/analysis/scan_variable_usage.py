@@ -25,6 +25,23 @@ READ_PATTERNS = [
 ]
 
 
+
+# Patterns de conditions : on veut compter les variables évaluées dans des tests.
+# NB: on travaille sur code_upper (ligne 8-72 en majuscules).
+# On vise les formes: IF VAR = ..., IF VAR NOT = ..., IF ... = VAR, WHEN VAR >= ..., PERFORM ... UNTIL VAR < ...
+COND_KEYWORDS = r"(?:IF|ELSE\s+IF|WHEN|UNTIL)"
+REL_OPS = r"(?:=|<>|<=|>=|<|>|EQUAL(?:\s+TO)?|NOT\s+EQUAL(?:\s+TO)?|LESS\s+THAN(?:\s+OR\s+EQUAL\s+TO)?|GREATER\s+THAN(?:\s+OR\s+EQUAL\s+TO)?)"
+
+CONDITION_PATTERNS = [
+    # IF/WHEN/UNTIL VAR <op> ...
+    r"\b{kw}\b\s+{var}\b\s+(?:NOT\s+)?{op}\b",
+    # IF/WHEN/UNTIL ... <op> VAR
+    r"\b{kw}\b.+?{op}\s+{var}\b",
+    # IF VAR (flag testé sans opérateur) => condition aussi
+    r"\b{kw}\b\s+{var}\b",
+]
+
+
 def _load_dd_for_program(dd_by_program_dir: Path, program: str) -> List[Dict[str, str]]:
     program_u = program.strip().upper()
     dd_path = dd_by_program_dir / f"{program_u}_dd.csv"
@@ -77,12 +94,28 @@ def _find_paragraph_for_seq(seq: int, ranges: List[Dict[str, object]]) -> str:
 
 
 def _classify_usage(var_token: str, code_upper: str) -> Optional[str]:
+    # 1) Écritures
     for pattern in WRITE_PATTERNS:
         if re.search(pattern.format(var=re.escape(var_token)), code_upper):
             return "write"
+
+    # 2) Conditions (IF/WHEN/UNTIL avec opérateurs relationnels)
+    for pattern in CONDITION_PATTERNS:
+        if re.search(
+            pattern.format(
+                kw=COND_KEYWORDS,
+                op=REL_OPS,
+                var=re.escape(var_token),
+            ),
+            code_upper,
+        ):
+            return "condition"
+
+    # 3) Lectures (hors tests)
     for pattern in READ_PATTERNS:
         if re.search(pattern.format(var=re.escape(var_token)), code_upper):
             return "read"
+
     return None
 
 

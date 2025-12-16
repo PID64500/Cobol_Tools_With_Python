@@ -1,380 +1,240 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 analyse_variables_critiques.py
-------------------------------
+--------------------------------
+Objectif :
+  Produire, par programme, un CSV "variables critiques" en croisant :
+    - le dictionnaire de données (dd_by_program/<PGM>_dd.csv)
+    - les usages (csv/<PGM>_usage.csv) issus de scan_variable_usage.py
 
-À partir :
-  - d'un fichier .etude COBOL
-  - d'un CSV d'usage des variables (sortie de scan_variable_usage.py)
+Sortie :
+  work_dir/csv/variables_critiques/<PGM>_variables_critiques.csv
 
-Produit :
-  - un CSV listant toutes les variables avec des indicateurs :
-    * nb_paragraphs
-    * nb_reads
-    * nb_writes
-    * nb_conditions
-    * nb_io
-    * has_88 / nb_88
-    * usage_count (global)
-    * is_critical (Y/N)
+Convention CSV :
+  - séparateur : ';' (Excel-friendly)
+  - encodage   : UTF-8 avec BOM (utf-8-sig) pour éviter les 'indÃ©terminÃ©'
 """
 
 from __future__ import annotations
 
-import argparse
 import csv
-import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Analyse les variables 'métier critiques' d'un programme COBOL."
-    )
-    parser.add_argument("etude_path", help="Chemin du fichier .etude")
-    parser.add_argument("usage_csv", help="CSV d'usage (sortie de scan_variable_usage.py)")
-    parser.add_argument(
-        "--out",
-        default="variables_critiques.csv",
-        help="CSV de sortie (défaut : variables_critiques.csv)",
-    )
-    return parser.parse_args()
+# -----------------------------
+# IO helpers
+# -----------------------------
+
+def _read_csv(path: Path, delimiter: str) -> List[Dict[str, str]]:
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as f:
+        reader = csv.DictReader(f, delimiter=delimiter)
+        return [{k: (v if v is not None else "") for k, v in row.items()} for row in reader]
 
 
-def extract_code_part(line: str) -> str:
+def load_dd(dd_csv_path: Path) -> List[Dict[str, str]]:
     """
-    colonnes 1–6 = numéros, col.7 = espace ou '*', code à partir de col.8.
+    Dictionnaire de données par programme.
+    Attendu : CSV séparé par virgule (',') avec colonnes :
+      program, section, source, level, name, parent_name, full_path, pic, ...
     """
-    if len(line) <= 6:
+    return _read_csv(dd_csv_path, delimiter=",")
+
+
+def load_usage(usage_csv_path: Path) -> List[Dict[str, str]]:
+    """
+    Usages variables par programme.
+    Attendu : CSV séparé par ';' avec colonnes :
+      program;variable;usage_type;paragraph;line_etude;context_usage_final
+    """
+    return _read_csv(usage_csv_path, delimiter=";")
+
+
+# -----------------------------
+# Core
+# -----------------------------
+
+@dataclass(frozen=True)
+class UsageAgg:
+    usage_count: int
+    nb_paragraphs: int
+    nb_reads: int
+    nb_writes: int
+    nb_conditions: int
+    nb_io: int
+
+
+def _is_io_context(ctx: str) -> bool:
+    u = (ctx or "").upper()
+    # heuristique volontairement simple
+    return ("READ " in u) or ("WRITE " in u) or ("REWRITE " in u) or ("DELETE " in u) or ("EXEC CICS" in u)
+
+
+def _aggregate_usage(usage_rows: List[Dict[str, str]]) -> Dict[str, UsageAgg]:
+    """
+    Agrège par variable (full_path) les stats issues de scan_variable_usage.
+    """
+    by_var: Dict[str, Dict[str, object]] = {}
+
+    for r in usage_rows:
+        var = (r.get("variable") or "").strip()
+        if not var:
+            continue
+
+        usage_type = (r.get("usage_type") or "").strip().lower()
+        paragraph = (r.get("paragraph") or "").strip()
+        ctx = (r.get("context_usage_final") or "")
+
+        d = by_var.setdefault(var, {
+            "reads": 0,
+            "writes": 0,
+            "conditions": 0,
+            "io": 0,
+            "paras": set(),
+        })
+
+        if paragraph:
+            d["paras"].add(paragraph)
+
+        if usage_type == "read":
+            d["reads"] += 1
+        elif usage_type == "write":
+            d["writes"] += 1
+        elif usage_type == "condition":
+            d["conditions"] += 1
+        else:
+            # type non standard -> neutre
+            d["reads"] += 1
+
+        if _is_io_context(ctx):
+            d["io"] += 1
+
+    out: Dict[str, UsageAgg] = {}
+    for var, d in by_var.items():
+        reads = int(d["reads"])
+        writes = int(d["writes"])
+        cond = int(d["conditions"])
+        io = int(d["io"])
+        paras = d["paras"]
+        usage_count = reads + writes + cond
+        out[var] = UsageAgg(
+            usage_count=usage_count,
+            nb_paragraphs=len(paras),
+            nb_reads=reads,
+            nb_writes=writes,
+            nb_conditions=cond,
+            nb_io=io,
+        )
+    return out
+
+
+def _root_name_from_full_path(full_path: str) -> str:
+    fp = (full_path or "").strip()
+    if not fp:
         return ""
-    return line[6:].rstrip("\n")
+    return fp.split("/")[0]
 
 
-def load_usage(usage_csv: Path) -> List[Dict[str, str]]:
-    rows: List[Dict[str, str]] = []
-    with usage_csv.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rows.append(row)
-    return rows
-
-
-def build_name_patterns(entries: List[Dict[str, str]]) -> Dict[str, re.Pattern]:
-    patterns: Dict[str, re.Pattern] = {}
-    for e in entries:
-        name = (e.get("name") or "").upper().strip()
-        if not name:
-            continue
-        if name in patterns:
-            continue
-        pat = re.compile(
-            r"(?<![A-Z0-9-])" + re.escape(name) + r"(?![A-Z0-9-])",
-            re.IGNORECASE,
-        )
-        patterns[name] = pat
-    return patterns
-
-
-def detect_paragraph_name(raw_line: str) -> Optional[str]:
+def _infer_role(name: str, pic: str) -> str:
     """
-    Détection stricte d’un paragraphe COBOL :
-
-      - colonnes 1–6 : numéros → ignorés
-      - colonne 7 : indicateur → ignoré (mais on vérifie le '*')
-      - colonne 8 : doit contenir le 1er caractère du paragraphe (pas un espace)
-      - on lit depuis col.8 jusqu'au premier espace → token
-      - token doit finir par '.'
-      - longueur du nom (sans '.') <= 30
-      - ne doit pas être un mot-clé COBOL / END-xxx
+    Heuristique volontairement simple.
     """
-    if len(raw_line) < 8:
-        return None
+    n = (name or "").upper()
+    p = (pic or "").upper()
 
-    if raw_line[6:7] == "*":
-        return None
-
-    code_area = raw_line[7:]
-    if not code_area:
-        return None
-
-    if code_area[0].isspace():
-        return None
-
-    token = code_area.split()[0]
-    if not token.endswith("."):
-        return None
-
-    name = token[:-1]
-
-    if not name or len(name) > 30:
-        return None
-
-    keywords = {
-        "IF", "MOVE", "PERFORM", "CALL", "EVALUATE", "ADD", "SUBTRACT",
-        "MULTIPLY", "DIVIDE", "COMPUTE", "GO", "DISPLAY", "ACCEPT",
-        "EXEC", "OPEN", "CLOSE", "READ", "WRITE", "REWRITE", "DELETE",
-        "SEARCH", "SET", "STRING", "UNSTRING", "INSPECT", "EXIT",
-        "CONTINUE", "GOBACK", "STOP",
-        "END-EXEC", "END-IF", "END-PERFORM",
-    }
-
-    if name.upper() in keywords:
-        return None
-
-    return name
+    if "DATE" in n or "DAT" in n:
+        return "date"
+    if "TIME" in n or "HEUR" in n:
+        return "heure"
+    if "STAT" in n or "STATUS" in n:
+        return "statut"
+    if "CODE" in n or "COD" in n:
+        return "code"
+    if "NOM" in n or "NAME" in n:
+        return "nom"
+    if "ID" in n:
+        return "identifiant"
+    if p.startswith(("9", "S9")):
+        return "numerique"
+    return "indéterminé"
 
 
-def compute_88_for_parents(entries: List[Dict[str, str]]) -> Dict[Tuple[str, str, str, str], int]:
-    counts: Dict[Tuple[str, str, str, str], int] = {}
+def _is_critical(agg: UsageAgg, name: str, level: str) -> bool:
+    """
+    Criticité pragmatique :
+    - ignore niveau 88
+    - critique si écrit (modification) OU très utilisé
+    """
+    if (level or "").strip() == "88":
+        return False
 
-    for e in entries:
-        level = (e.get("level") or "").strip()
-        if level != "88":
-            continue
+    if agg.nb_writes > 0:
+        return True
 
-        program = (e.get("program") or "").upper()
-        section = (e.get("section") or "").upper()
-        fp_88 = (e.get("full_path") or "").upper()
-        if not fp_88 or "/" not in fp_88:
-            parent_name = (e.get("parent_name") or "").upper()
-            if not parent_name:
-                continue
-            key = (program, section, parent_name, parent_name)
-            counts[key] = counts.get(key, 0) + 1
-            continue
+    if agg.usage_count >= 30:
+        return True
 
-        parent_fp = fp_88.rsplit("/", 1)[0]
-        parent_name = parent_fp.split("/")[-1]
-        key = (program, section, parent_name, parent_fp)
-        counts[key] = counts.get(key, 0) + 1
+    n = (name or "").upper()
+    if any(k in n for k in ["RESP", "RETOUR", "ERR", "ANOM", "ABEND"]):
+        return agg.usage_count > 0
 
-    return counts
-
-
-def analyse_usages_detailles(
-    etude_path: Path,
-    entries: List[Dict[str, str]],
-) -> Dict[Tuple[str, str, str, str], Dict[str, object]]:
-    patterns = build_name_patterns(entries)
-
-    entries_by_name: Dict[str, List[Dict[str, str]]] = {}
-    for e in entries:
-        name = (e.get("name") or "").upper().strip()
-        if not name:
-            continue
-        entries_by_name.setdefault(name, []).append(e)
-
-    stats: Dict[Tuple[str, str, str, str], Dict[str, object]] = {}
-
-    def get_stats_key(entry: Dict[str, str]) -> Tuple[str, str, str, str]:
-        program = (entry.get("program") or "").upper()
-        section = (entry.get("section") or "").upper()
-        name = (entry.get("name") or "").upper()
-        fp = (entry.get("full_path") or "").upper() or name
-        return (program, section, name, fp)
-
-    for e in entries:
-        level = (e.get("level") or "").strip()
-        if level == "88":
-            continue
-
-        key = get_stats_key(e)
-        if key not in stats:
-            stats[key] = {
-                "nb_paragraphs": set(),  # type: Set[str]
-                "nb_reads": 0,
-                "nb_writes": 0,
-                "nb_conditions": 0,
-                "nb_io": 0,
-            }
-
-    lines = etude_path.read_text(encoding="latin-1", errors="ignore").splitlines()
-
-    in_procedure = False
-    current_paragraph: Optional[str] = None
-
-    for raw in lines:
-        code = extract_code_part(raw)
-        if not code.strip():
-            continue
-
-        uc = code.upper()
-
-        if not in_procedure and "PROCEDURE DIVISION" in uc:
-            in_procedure = True
-
-        if not in_procedure:
-            continue
-
-        if code.lstrip().startswith("*"):
-            continue
-
-        para = detect_paragraph_name(raw)
-        if para:
-            current_paragraph = para
-
-        is_cond_line = bool(re.search(r"\b(IF|EVALUATE|WHEN|UNTIL|WHILE)\b", uc))
-        is_io_line = bool(re.search(r"\b(READ|WRITE|REWRITE|DELETE|OPEN|CLOSE)\b", uc)) or (
-            "EXEC CICS" in uc and ("SEND" in uc or "RECEIVE" in uc)
-        )
-
-        idx_move = uc.find("MOVE ")
-        idx_to = uc.find(" TO ") if idx_move != -1 else -1
-
-        for name, pat in patterns.items():
-            for m in pat.finditer(code):
-                start_pos = m.start()
-
-                for e in entries_by_name.get(name.upper(), []):
-                    level = (e.get("level") or "").strip()
-                    if level == "88":
-                        continue
-
-                    key = get_stats_key(e)
-                    if key not in stats:
-                        continue
-                    st = stats[key]
-
-                    if current_paragraph:
-                        st["nb_paragraphs"].add(current_paragraph)
-
-                    if is_cond_line:
-                        st["nb_conditions"] += 1
-
-                    if is_io_line:
-                        st["nb_io"] += 1
-
-                    if idx_move != -1 and idx_to != -1 and idx_move < idx_to:
-                        if start_pos > idx_to:
-                            st["nb_writes"] += 1
-                        else:
-                            st["nb_reads"] += 1
-                    else:
-                        st["nb_reads"] += 1
-
-    for st in stats.values():
-        st["nb_paragraphs"] = len(st["nb_paragraphs"])
-
-    return stats
-
-
-def infer_role(name: str, root_name: str, pic: str) -> str:
-    u = name.upper()
-    r = root_name.upper()
-    pic_u = (pic or "").upper()
-
-    if "FLAG" in u or "FLAG" in r or "IND" in u or "INDIC" in u or "ETAT" in u or "STATE" in u:
-        return "FLAG/ETAT"
-
-    if "CODE" in u or "CD-" in u:
-        return "CODE"
-
-    if "ID" in u or u.endswith("-ID") or "IDENT" in u:
-        return "IDENTIFIANT"
-
-    if "DATE" in u or "DT-" in u:
-        return "DATE"
-
-    if "MONTANT" in u or "AMT" in u or "AMOUNT" in u:
-        return "MONTANT"
-
-    if pic_u.startswith("S9") or pic_u.startswith("9("):
-        return "NUMERIQUE"
-
-    return ""
+    return False
 
 
 def build_variables_critiques(
-    etude_path: Path,
+    dd_rows: List[Dict[str, str]],
     usage_rows: List[Dict[str, str]],
-) -> List[Dict[str, str]]:
-    detailed_stats = analyse_usages_detailles(etude_path, usage_rows)
-    counts_88 = compute_88_for_parents(usage_rows)
+) -> List[Dict[str, object]]:
+    """
+    Produit les lignes finales (une ligne par variable DD).
+    """
+    usage_agg = _aggregate_usage(usage_rows)
 
-    results: List[Dict[str, str]] = []
+    results: List[Dict[str, object]] = []
 
-    for e in usage_rows:
+    for e in dd_rows:
         level = (e.get("level") or "").strip()
         if level == "88":
             continue
 
-        program = (e.get("program") or "")
-        section = (e.get("section") or "")
-        source = (e.get("source") or "")
-        name = (e.get("name") or "")
-        fp = e.get("full_path") or name
-        pic = e.get("pic") or ""
-        usage_flag = (e.get("used") or "N")
-        usage_count = e.get("usage_count") or "0"
+        full_path = (e.get("full_path") or "").strip()
+        name = (e.get("name") or "").strip()
 
-        key = (
-            (program or "").upper(),
-            (section or "").upper(),
-            (name or "").upper(),
-            (fp or "").upper(),
-        )
+        agg = usage_agg.get(full_path) or usage_agg.get(name)
+        if not agg:
+            agg = UsageAgg(0, 0, 0, 0, 0, 0)
 
-        st = detailed_stats.get(key, None)
-        nb_paragraphs = st["nb_paragraphs"] if st else 0
-        nb_reads = st["nb_reads"] if st else 0
-        nb_writes = st["nb_writes"] if st else 0
-        nb_conditions = st["nb_conditions"] if st else 0
-        nb_io = st["nb_io"] if st else 0
+        usage_flag = "Y" if agg.usage_count > 0 else "N"
 
-        nb_88 = counts_88.get(key, 0)
-        has_88 = "Y" if nb_88 > 0 else "N"
-
-        root_name = fp.split("/")[0] if "/" in fp else fp
-
-        try:
-            usage_count_int = int(usage_count)
-        except ValueError:
-            usage_count_int = 0
-
-        is_critical = (
-            nb_conditions > 0
-            or nb_io > 0
-            or nb_paragraphs >= 2
-            or has_88 == "Y"
-            or usage_count_int > 5
-        )
-        is_critical_flag = "Y" if is_critical else "N"
-
-        role = infer_role(name, root_name, pic)
-
-        result = {
-            "program": program,
-            "section": section,
-            "source": source,
-            "root_name": root_name,
+        row = {
+            "program": (e.get("program") or "").strip(),
+            "section": (e.get("section") or "").strip(),
+            "source": (e.get("source") or "").strip(),
+            "root_name": _root_name_from_full_path(full_path or name),
             "name": name,
-            "full_path": fp,
+            "full_path": full_path or name,
             "level": level,
-            "pic": pic,
+            "pic": (e.get("pic") or "").strip(),
             "usage_flag": usage_flag,
-            "usage_count": usage_count,
-            "nb_paragraphs": str(nb_paragraphs),
-            "nb_reads": str(nb_reads),
-            "nb_writes": str(nb_writes),
-            "nb_conditions": str(nb_conditions),
-            "nb_io": str(nb_io),
-            "has_88": has_88,
-            "nb_88": str(nb_88),
-            "is_critical": is_critical_flag,
-            "role_infered": role,
+            "usage_count": agg.usage_count,
+            "nb_paragraphs": agg.nb_paragraphs,
+            "nb_reads": agg.nb_reads,
+            "nb_writes": agg.nb_writes,
+            "nb_conditions": agg.nb_conditions,
+            "nb_io": agg.nb_io,
+            "has_88": "N",
+            "nb_88": 0,
+            "is_critical": "Y" if _is_critical(agg, name, level) else "N",
+            "role_infered": _infer_role(name, (e.get("pic") or "")),
         }
+        results.append(row)
 
-        results.append(result)
-
+    results.sort(key=lambda r: (-(int(r.get("usage_count") or 0)), str(r.get("full_path") or "")))
     return results
 
 
-def write_variables_critiques(rows: List[Dict[str, str]], out_csv: Path) -> None:
-    if not rows:
-        print("[AVERTISSEMENT] Aucune variable trouvée.")
-        return
+def write_variables_critiques_csv(out_csv_path: Path, rows: List[Dict[str, object]]) -> None:
+    out_csv_path.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = [
         "program",
@@ -398,37 +258,29 @@ def write_variables_critiques(rows: List[Dict[str, str]], out_csv: Path) -> None
         "role_infered",
     ]
 
-    with out_csv.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+    with out_csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=";")
         writer.writeheader()
         for r in rows:
             writer.writerow(r)
 
 
-def main() -> int:
-    args = parse_args()
-    etude_path = Path(args.etude_path)
-    usage_csv_path = Path(args.usage_csv)
-    out_csv_path = Path(args.out)
-
-    if not etude_path.exists():
-        print(f"[ERREUR] Fichier .etude introuvable : {etude_path}")
-        return 1
+def analyse_variables_critiques(
+    dict_csv_path: Path,
+    usage_csv_path: Path,
+    out_csv_path: Path,
+) -> int:
+    """
+    API pipeline : retourne 0 si OK, 1 si KO.
+    """
+    if not dict_csv_path.exists():
+        raise FileNotFoundError(f"DD manquant : {dict_csv_path}")
     if not usage_csv_path.exists():
-        print(f"[ERREUR] Fichier d'usage introuvable : {usage_csv_path}")
-        return 1
+        raise FileNotFoundError(f"USAGE manquant : {usage_csv_path}")
 
+    dd_rows = load_dd(dict_csv_path)
     usage_rows = load_usage(usage_csv_path)
-    if not usage_rows:
-        print("[ERREUR] Usage CSV vide.")
-        return 1
 
-    rows = build_variables_critiques(etude_path, usage_rows)
-    write_variables_critiques(rows, out_csv_path)
-
-    print(f"[OK] Variables critiques générées dans : {out_csv_path}")
+    rows = build_variables_critiques(dd_rows, usage_rows)
+    write_variables_critiques_csv(out_csv_path, rows)
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
