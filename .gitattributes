@@ -1,0 +1,12 @@
+# Par défaut
+* text=auto
+
+# Python
+*.py text eol=lf
+
+# YAML
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Shell
+*.sh text eol=lf

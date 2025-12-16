@@ -16,6 +16,7 @@ import sys
 import os
 from dataclasses import dataclass
 from typing import List, Dict, Any
+from pathlib import Path
 import logging
 logger = logging.getLogger(__name__)
 
@@ -29,21 +30,26 @@ class Paragraph:
 
 def is_paragraph_line(line: str) -> bool:
     """
-    Determine si une ligne .etude contient un debut de paragraphe.
+    Règle unifiée de détection de paragraphe COBOL sur une ligne .cbl.etude.
 
-    Format normalise :
-      - colonnes 1-6 : sequence numerique
-      - colonnes 7-72 : code COBOL
-      - colonnes 73-80 : espaces
-
-    On considere "paragraphe" si :
-      - col 8 (index 7) n'est pas un espace
-      - premier token se termine par un point (ex: 100-INITIALISATION.)
+    On considère qu'il s'agit d'un paragraphe si :
+      - la ligne fait au moins 8 colonnes,
+      - la colonne 7 (index 6) n'est pas '*',
+      - la colonne 8 (index 7) n'est pas un espace,
+      - la zone code (cols 8-72) ne contient qu'un seul token,
+      - ce token se termine par un point,
+      - le nom de paragraphe (sans le point final) fait 1 à 30 caractères,
+      - il ne contient que lettres/chiffres/tirets,
+      - il commence par une lettre ou un chiffre.
     """
     if len(line) < 8:
         return False
 
-    # colonne 8
+    # Colonne 7 = index 6 : si '*', c'est un commentaire
+    if line[6] == "*":
+        return False
+
+    # Colonne 8 = index 7 : doit être non vide
     if line[7] == " ":
         return False
 
@@ -51,9 +57,29 @@ def is_paragraph_line(line: str) -> bool:
     if not code:
         return False
 
-    first_token = code.split()[0]
-    if not first_token.endswith("."):
+    tokens = code.split()
+    # On veut exactement un seul mot sur la ligne
+    if len(tokens) != 1:
         return False
+
+    token = tokens[0]
+    if not token.endswith("."):
+        return False
+
+    name = token[:-1]  # sans le point final
+    if not (1 <= len(name) <= 30):
+        return False
+
+    upper = name.upper()
+
+    # Premier caractère : lettre ou chiffre
+    if not upper[0].isalnum():
+        return False
+
+    # Tous les caractères : lettre, chiffre ou tiret
+    for ch in upper:
+        if not (ch.isalnum() or ch == "-"):
+            return False
 
     return True
 
@@ -119,47 +145,51 @@ def print_paragraph_table(paragraphs: List[Paragraph], etude_path: str) -> None:
 def extract_from_files(files: List[Any]) -> Dict[str, List[Paragraph]]:
     """
     Wrapper haut niveau :
-    - accepte soit une liste de chemins (str)
-      ex: [".../SRSTAB.cbl.etude", ".../SRSRRET.cbl.etude"]
-    - soit une liste de dictionnaires décrivant les fichiers normalisés
-      ex: [{"etude_path": ".../SRSTAB.cbl.etude", ...}, {...}, ...]
+    - accepte :
+        * une liste de chemins (str ou Path)
+          ex: ["./SRSTAB.cbl.etude", Path("./SRSRRET.cbl.etude")]
+        * une liste de dictionnaires décrivant les fichiers normalisés
+          ex: [{"etude_path": "./SRSTAB.cbl.etude", ...}, {...}, ...]
 
     Retourne un dict :
-      { chemin_fichier: [Paragraph, ...] }
+      { chemin_fichier(str) : [Paragraph, ...] }
     """
     result: Dict[str, List[Paragraph]] = {}
 
     for f in files:
-        # Cas 1 : f est déjà un chemin (str)
-        if isinstance(f, str):
-            etude_path = f
+        etude_path_str: str
+
+        # Cas 1 : f est déjà un chemin (str ou Path)
+        if isinstance(f, (str, Path)):
+            etude_path_str = str(f)
 
         # Cas 2 : f est un dict -> on essaie de trouver une clé de chemin
         elif isinstance(f, dict):
-            # On essaie plusieurs clés possibles, tu pourras adapter si besoin
             possible_keys = ["etude_path", "normalized_path", "path", "file", "filename"]
-            etude_path = None
+            path_value = None
 
             for key in possible_keys:
-                if key in f:
-                    etude_path = f[key]
+                if key in f and f[key]:
+                    path_value = f[key]
                     break
 
-            if etude_path is None:
+            if path_value is None:
                 raise KeyError(
                     f"Aucune clé de chemin trouvée dans l'entrée : {f}. "
-                    f"Adapté 'possible_keys' dans extract_from_files()."
+                    f"Adapte 'possible_keys' dans extract_from_files()."
                 )
+
+            etude_path_str = str(path_value)
 
         else:
             raise TypeError(
                 f"Type inattendu dans files : {type(f)}. "
-                f"Attendu str ou dict."
+                f"Attendu str, pathlib.Path ou dict."
             )
 
         # Maintenant on est sûr d'avoir un chemin texte
-        paragraphs = extract_paragraphs(etude_path)
-        result[etude_path] = paragraphs
+        paragraphs = extract_paragraphs(etude_path_str)
+        result[etude_path_str] = paragraphs
 
     return result
 

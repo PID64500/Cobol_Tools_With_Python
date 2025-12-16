@@ -52,10 +52,27 @@ class Caller:
 # ─────────────────────────────────────────────────────────────
 
 def is_paragraph_line(line: str) -> bool:
+    """
+    Règle unifiée de détection de paragraphe COBOL sur une ligne .cbl.etude.
+
+    On considère qu'il s'agit d'un paragraphe si :
+      - la ligne fait au moins 8 colonnes,
+      - la colonne 7 (index 6) n'est pas '*',
+      - la colonne 8 (index 7) n'est pas un espace,
+      - la zone code (cols 8-72) ne contient qu'un seul token,
+      - ce token se termine par un point,
+      - le nom de paragraphe (sans le point final) fait 1 à 30 caractères,
+      - il ne contient que lettres/chiffres/tirets,
+      - il commence par une lettre ou un chiffre.
+    """
     if len(line) < 8:
         return False
 
-    # col 8 (index 7) doit être non blanc
+    # Colonne 7 = index 6 : si '*', c'est un commentaire
+    if line[6] == "*":
+        return False
+
+    # Colonne 8 = index 7 : doit être non vide
     if line[7] == " ":
         return False
 
@@ -63,12 +80,31 @@ def is_paragraph_line(line: str) -> bool:
     if not code:
         return False
 
-    first_token = code.split()[0]
-    if not first_token.endswith("."):
+    tokens = code.split()
+    # On veut exactement un seul mot sur la ligne
+    if len(tokens) != 1:
         return False
 
-    return True
+    token = tokens[0]
+    if not token.endswith("."):
+        return False
 
+    name = token[:-1]  # sans le point final
+    if not (1 <= len(name) <= 30):
+        return False
+
+    upper = name.upper()
+
+    # Premier caractère : lettre ou chiffre
+    if not upper[0].isalnum():
+        return False
+
+    # Tous les caractères : lettre, chiffre ou tiret
+    for ch in upper:
+        if not (ch.isalnum() or ch == "-"):
+            return False
+
+    return True
 
 def extract_paragraphs(etude_path: str) -> List[Paragraph]:
     paragraphs: List[Paragraph] = []

@@ -18,6 +18,9 @@ __pycache__/
 *.log
 *.tmp
 *.bak
+*.csv
+*.txt
+cobol_work/
 
 # Autres caches
 .cache/

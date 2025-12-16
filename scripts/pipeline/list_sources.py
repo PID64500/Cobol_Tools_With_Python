@@ -18,6 +18,7 @@ import os
 import yaml
 from typing import List, Dict
 import logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -76,6 +77,9 @@ def write_sources_log(config: Dict, cobol_files: List[str]) -> None:
     output_dir = os.path.abspath(config.get("output_dir", "./output"))
     work_dir = os.path.abspath(config.get("work_dir", "./work"))
 
+    # Nouveau : répertoire etude/
+    etude_dir = os.path.join(work_dir, "etude")
+    os.makedirs(etude_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
 
     log_path = os.path.join(output_dir, "list_sources.log")
@@ -95,13 +99,12 @@ def write_sources_log(config: Dict, cobol_files: List[str]) -> None:
         if cobol_files:
             for path in cobol_files:
                 base = os.path.basename(path)
-                etude = os.path.join(work_dir, base + ".etude")
+                etude = os.path.join(etude_dir, base + ".etude")
                 f.write(f"ETUDE : {etude}\n")
         else:
             f.write("(Aucun fichier .etude)\n")
 
     print(f"[OK] Log des sources ecrit dans : {log_path}")
-
 
 # Mode autonome
 if __name__ == "__main__":
