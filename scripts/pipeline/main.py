@@ -19,6 +19,9 @@ from ..analysis import scan_variable_usage  # ← brique intégrée via appel di
 from ..analysis import analyse_structures_logiques  # ← brique intégrée
 from ..analysis import analyse_variables_critiques  # ← nouvelle brique
 from ..analysis import scan_unused_variables  # ← Niveau 1.1 variables inutilisées
+from ..analysis import analyse_redefines_dangereux  # ← Niveau 1.2 REDEFINES dangereux
+from ..analysis import analyse_occurs_inutilises  # ← Niveau 1.3 OCCURS non utilisés
+from ..analysis import analyse_niveaux_cobol  # ← Niveau 1.4 anomalies niveaux COBOL
 
 logger = logging.getLogger(__name__)
 
@@ -173,16 +176,16 @@ def run_pipeline(config: dict) -> None:
     logger.info("  output_dir  = %s", output_dir)
 
     # 1) Nettoyage / préparation des dossiers
-    logger.info("Étape 1/11 – Nettoyage / préparation des répertoires de travail")
+    logger.info("Étape 1/13 – Nettoyage / préparation des répertoires de travail")
     clean_dirs.clean_work_and_output(config)
 
     # 2) Listing des sources COBOL
-    logger.info("Étape 2/11 – Listing des sources COBOL")
+    logger.info("Étape 2/13 – Listing des sources COBOL")
     source_files = list_sources.list_cobol_sources(config)
     logger.info("  %d fichier(s) COBOL détecté(s)", len(source_files))
 
     # 3) Normalisation des sources (.etude)
-    logger.info("Étape 3/11 – Normalisation des sources (.etude)")
+    logger.info("Étape 3/13 – Normalisation des sources (.etude)")
     normalized_files = normalize_file.normalize_list_files(
         source_files=source_files,
         config=config,
@@ -190,17 +193,17 @@ def run_pipeline(config: dict) -> None:
     logger.info("  %d fichier(s) .etude généré(s)", len(normalized_files))
 
     # 4) Exploitation .etude pour référentiel COPYBOOK + DD program/copybooks
-    logger.info("Étape 4/11 – Génération DD programme + référentiel COPYBOOK")
+    logger.info("Étape 4/13 – Génération DD programme + référentiel COPYBOOK")
     dd_paths = build_program_dd_and_copybooks.generate_dd_and_copybooks(config)
     logger.info("✅ DD générés : %s", {k: str(v) for k, v in dd_paths.items()})
 
     # 5) Structure des programmes : program_structure.csv
-    logger.info("Étape 5/11 – Génération de program_structure.csv (structure des paragraphes)")
+    logger.info("Étape 5/13 – Génération de program_structure.csv (structure des paragraphes)")
     program_structure_csv = program_structure.generate_program_structure(work_dir)
     logger.info("  program_structure.csv généré : %s", program_structure_csv)
 
     # 6) Branche DATA – Construction des dictionnaires de données
-    logger.info("Étape 6/11 – Construction des dictionnaires de données (build_data_dictionary)")
+    logger.info("Étape 6/13 – Construction des dictionnaires de données (build_data_dictionary)")
 
     data_dict_global = csv_dir / "data_dictionary_global.csv"
     data_dict_by_program_dir = csv_dir / "dd_by_program"
@@ -214,7 +217,7 @@ def run_pipeline(config: dict) -> None:
     )
 
     # 7) Scan des usages variables – appel direct
-    logger.info("Étape 7/11 – Scan des usages de variables (scan_variable_usage)")
+    logger.info("Étape 7/13 – Scan des usages de variables (scan_variable_usage)")
 
     usage_outputs = scan_variable_usage.scan_variable_usage(
         normalized_files=normalized_files,
@@ -226,7 +229,7 @@ def run_pipeline(config: dict) -> None:
     logger.info("  %d fichier(s) usage généré(s)", len(usage_outputs))
 
     # 8) Analyse des structures logiques – 1 fichier par programme
-    logger.info("Étape 8/11 – Analyse des structures logiques (analyse_structures_logiques)")
+    logger.info("Étape 8/13 – Analyse des structures logiques (analyse_structures_logiques)")
 
     structures_dir = csv_dir / "structures_logiques"
     structures_dir.mkdir(parents=True, exist_ok=True)
@@ -260,7 +263,7 @@ def run_pipeline(config: dict) -> None:
     logger.info("  %d fichier(s) structures logiques généré(s)", len(structures_outputs))
 
     # 9) Analyse des variables critiques – 1 fichier par programme
-    logger.info("Étape 9/11 – Analyse des variables critiques (analyse_variables_critiques)")
+    logger.info("Étape 9/13 – Analyse des variables critiques (analyse_variables_critiques)")
 
     variables_critiques_dir = csv_dir / "variables_critiques"
     variables_critiques_dir.mkdir(parents=True, exist_ok=True)
@@ -303,7 +306,7 @@ def run_pipeline(config: dict) -> None:
 
 
     # 10) Niveau 1.1 – Détection des variables inutilisées (scan_unused_variables)
-    logger.info("Étape 10/11 – Détection des variables inutilisées (scan_unused_variables)")
+    logger.info("Étape 10/13 – Détection des variables inutilisées (scan_unused_variables)")
 
     try:
         out_info = scan_unused_variables.scan_unused_variables(
@@ -324,8 +327,86 @@ def run_pipeline(config: dict) -> None:
     except Exception as e:
         logger.exception("  Erreur scan_unused_variables : %s", e)
 
+    # 11) Niveau 1.2 – Détection des REDEFINES dangereux
+    logger.info("Étape 11/13 – Détection des REDEFINES dangereux (analyse_redefines_dangereux)")
+
+    redefines_dir = csv_dir / "redefines_dangereux"
+    redefines_dir.mkdir(parents=True, exist_ok=True)
+
+    nb_redef = 0
+    for etude_path in normalized_files:
+        prog = Path(etude_path).name.split(".")[0].upper()
+        usage_csv = csv_dir / f"{prog}_usage.csv"
+        dict_csv = data_dict_by_program_dir / f"{prog}_dd.csv"
+        if not usage_csv.is_file() or not dict_csv.is_file():
+            continue
+
+        out_csv = redefines_dir / f"{prog}_redefines_dangereux.csv"
+        try:
+            analyse_redefines_dangereux.analyse_redefines_dangereux(
+                dd_csv_path=dict_csv,
+                usage_csv_path=usage_csv,
+                out_csv_path=out_csv,
+            )
+            nb_redef += 1
+        except Exception as e:
+            logger.exception("  Erreur redefines %s : %s", prog, e)
+
+    logger.info("  %d fichier(s) REDEFINES dangereux généré(s)", nb_redef)
+
+    # 12) Niveau 1.3 – Détection des OCCURS non utilisés
+    logger.info("Étape 12/13 – Détection des OCCURS non utilisés (analyse_occurs_inutilises)")
+
+    occurs_dir = csv_dir / "occurs_inutilises"
+    occurs_dir.mkdir(parents=True, exist_ok=True)
+
+    nb_occ = 0
+    for etude_path in normalized_files:
+        prog = Path(etude_path).name.split(".")[0].upper()
+        usage_csv = csv_dir / f"{prog}_usage.csv"
+        dict_csv = data_dict_by_program_dir / f"{prog}_dd.csv"
+        if not usage_csv.is_file() or not dict_csv.is_file():
+            continue
+
+        out_csv = occurs_dir / f"{prog}_occurs_inutilises.csv"
+        try:
+            analyse_occurs_inutilises.analyse_occurs_inutilises(
+                dd_csv_path=dict_csv,
+                usage_csv_path=usage_csv,
+                out_csv_path=out_csv,
+            )
+            nb_occ += 1
+        except Exception as e:
+            logger.exception("  Erreur occurs %s : %s", prog, e)
+
+    logger.info("  %d fichier(s) OCCURS non utilisés généré(s)", nb_occ)
+
+    # 13) Niveau 1.4 – Anomalies de niveaux COBOL
+    logger.info("Étape 13/13 – Détection des anomalies de niveaux COBOL (analyse_niveaux_cobol)")
+
+    levels_dir = csv_dir / "anomalies_niveaux"
+    levels_dir.mkdir(parents=True, exist_ok=True)
+
+    nb_lvl = 0
+    for etude_path in normalized_files:
+        prog = Path(etude_path).name.split(".")[0].upper()
+        dict_csv = data_dict_by_program_dir / f"{prog}_dd.csv"
+        if not dict_csv.is_file():
+            continue
+
+        out_csv = levels_dir / f"{prog}_anomalies_niveaux.csv"
+        try:
+            analyse_niveaux_cobol.analyse_niveaux_cobol(
+                dd_csv_path=dict_csv,
+                out_csv_path=out_csv,
+            )
+            nb_lvl += 1
+        except Exception as e:
+            logger.exception("  Erreur niveaux %s : %s", prog, e)
+
+    logger.info("  %d fichier(s) anomalies niveaux généré(s)", nb_lvl)
+
 # n) Étape n : réservées pour futures branches (graphes, synthèse globale...)
-    logger.info("Étape 11/11 – (Réservée pour futures analyses : graphes, appels, etc.)")
     logger.info("Pipeline terminé ✅")
 
 
