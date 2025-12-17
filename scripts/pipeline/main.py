@@ -2,6 +2,7 @@
 main.py – Orchestration du pipeline d'analyse COBOL
 """
 
+from logging import config
 import sys
 import logging
 import subprocess
@@ -23,6 +24,8 @@ from ..analysis import analyse_redefines_dangereux  # ← Niveau 1.2 REDEFINES d
 from ..analysis import analyse_occurs_inutilises  # ← Niveau 1.3 OCCURS non utilisés
 from ..analysis import analyse_niveaux_cobol  # ← Niveau 1.4 anomalies niveaux COBOL
 from ..data import data_concepts_usage  # ← Niveau 2.1 concepts de données (pivot transverse)
+from ..data import structures_cartography  # ← Niveau 2.2 cartographie des structures
+from ..data import concepts_consolidation  # ← Niveau 2.C consolidation des concepts
 
 logger = logging.getLogger(__name__)
 
@@ -177,16 +180,16 @@ def run_pipeline(config: dict) -> None:
     logger.info("  output_dir  = %s", output_dir)
 
     # 1) Nettoyage / préparation des dossiers
-    logger.info("Étape 1/13 – Nettoyage / préparation des répertoires de travail")
+    logger.info("Étape 1/16 – Nettoyage / préparation des répertoires de travail")
     clean_dirs.clean_work_and_output(config)
 
     # 2) Listing des sources COBOL
-    logger.info("Étape 2/13 – Listing des sources COBOL")
+    logger.info("Étape 2/16 – Listing des sources COBOL")
     source_files = list_sources.list_cobol_sources(config)
     logger.info("  %d fichier(s) COBOL détecté(s)", len(source_files))
 
     # 3) Normalisation des sources (.etude)
-    logger.info("Étape 3/13 – Normalisation des sources (.etude)")
+    logger.info("Étape 3/16 – Normalisation des sources (.etude)")
     normalized_files = normalize_file.normalize_list_files(
         source_files=source_files,
         config=config,
@@ -194,17 +197,17 @@ def run_pipeline(config: dict) -> None:
     logger.info("  %d fichier(s) .etude généré(s)", len(normalized_files))
 
     # 4) Exploitation .etude pour référentiel COPYBOOK + DD program/copybooks
-    logger.info("Étape 4/13 – Génération DD programme + référentiel COPYBOOK")
+    logger.info("Étape 4/16 – Génération DD programme + référentiel COPYBOOK")
     dd_paths = build_program_dd_and_copybooks.generate_dd_and_copybooks(config)
     logger.info("✅ DD générés : %s", {k: str(v) for k, v in dd_paths.items()})
 
     # 5) Structure des programmes : program_structure.csv
-    logger.info("Étape 5/13 – Génération de program_structure.csv (structure des paragraphes)")
+    logger.info("Étape 5/16 – Génération de program_structure.csv (structure des paragraphes)")
     program_structure_csv = program_structure.generate_program_structure(work_dir)
     logger.info("  program_structure.csv généré : %s", program_structure_csv)
 
     # 6) Branche DATA – Construction des dictionnaires de données
-    logger.info("Étape 6/13 – Construction des dictionnaires de données (build_data_dictionary)")
+    logger.info("Étape 6/16 – Construction des dictionnaires de données (build_data_dictionary)")
 
     data_dict_global = csv_dir / "data_dictionary_global.csv"
     data_dict_by_program_dir = csv_dir / "dd_by_program"
@@ -218,7 +221,7 @@ def run_pipeline(config: dict) -> None:
     )
 
     # 7) Scan des usages variables – appel direct
-    logger.info("Étape 7/13 – Scan des usages de variables (scan_variable_usage)")
+    logger.info("Étape 7/16 – Scan des usages de variables (scan_variable_usage)")
 
     usage_outputs = scan_variable_usage.scan_variable_usage(
         normalized_files=normalized_files,
@@ -230,7 +233,7 @@ def run_pipeline(config: dict) -> None:
     logger.info("  %d fichier(s) usage généré(s)", len(usage_outputs))
 
     # 8) Analyse des structures logiques – 1 fichier par programme
-    logger.info("Étape 8/13 – Analyse des structures logiques (analyse_structures_logiques)")
+    logger.info("Étape 8/16 – Analyse des structures logiques (analyse_structures_logiques)")
 
     structures_dir = csv_dir / "structures_logiques"
     structures_dir.mkdir(parents=True, exist_ok=True)
@@ -264,7 +267,7 @@ def run_pipeline(config: dict) -> None:
     logger.info("  %d fichier(s) structures logiques généré(s)", len(structures_outputs))
 
     # 9) Analyse des variables critiques – 1 fichier par programme
-    logger.info("Étape 9/13 – Analyse des variables critiques (analyse_variables_critiques)")
+    logger.info("Étape 9/16 – Analyse des variables critiques (analyse_variables_critiques)")
 
     variables_critiques_dir = csv_dir / "variables_critiques"
     variables_critiques_dir.mkdir(parents=True, exist_ok=True)
@@ -307,7 +310,7 @@ def run_pipeline(config: dict) -> None:
 
 
     # 10) Niveau 1.1 – Détection des variables inutilisées (scan_unused_variables)
-    logger.info("Étape 10/13 – Détection des variables inutilisées (scan_unused_variables)")
+    logger.info("Étape 10/16 – Détection des variables inutilisées (scan_unused_variables)")
 
     try:
         out_info = scan_unused_variables.scan_unused_variables(
@@ -329,7 +332,7 @@ def run_pipeline(config: dict) -> None:
         logger.exception("  Erreur scan_unused_variables : %s", e)
 
     # 11) Niveau 1.2 – Détection des REDEFINES dangereux
-    logger.info("Étape 11/13 – Détection des REDEFINES dangereux (analyse_redefines_dangereux)")
+    logger.info("Étape 11/16 – Détection des REDEFINES dangereux (analyse_redefines_dangereux)")
 
     redefines_dir = csv_dir / "redefines_dangereux"
     redefines_dir.mkdir(parents=True, exist_ok=True)
@@ -356,7 +359,7 @@ def run_pipeline(config: dict) -> None:
     logger.info("  %d fichier(s) REDEFINES dangereux généré(s)", nb_redef)
 
     # 12) Niveau 1.3 – Détection des OCCURS non utilisés
-    logger.info("Étape 12/13 – Détection des OCCURS non utilisés (analyse_occurs_inutilises)")
+    logger.info("Étape 12/16 – Détection des OCCURS non utilisés (analyse_occurs_inutilises)")
 
     occurs_dir = csv_dir / "occurs_inutilises"
     occurs_dir.mkdir(parents=True, exist_ok=True)
@@ -383,7 +386,7 @@ def run_pipeline(config: dict) -> None:
     logger.info("  %d fichier(s) OCCURS non utilisés généré(s)", nb_occ)
 
     # 13) Niveau 1.4 – Anomalies de niveaux COBOL
-    logger.info("Étape 13/13 – Détection des anomalies de niveaux COBOL (analyse_niveaux_cobol)")
+    logger.info("Étape 13/16 – Détection des anomalies de niveaux COBOL (analyse_niveaux_cobol)")
 
     levels_dir = csv_dir / "anomalies_niveaux"
     levels_dir.mkdir(parents=True, exist_ok=True)
@@ -409,10 +412,11 @@ def run_pipeline(config: dict) -> None:
 
 
     # 14) Niveau 2.1 – Concepts de données (pivot transverse)
-    logger.info("Étape 14/14 – Analyse des concepts de données (data_concepts_usage)")
+    logger.info("Étape 14/16 – Analyse des concepts de données (data_concepts_usage)")
 
     # Où trouver les règles (fichier CSV versionné dans le repo)
-    rules_csv = Path(config.get("data_concepts_rules_csv", "resources/niveau2/data_concepts_rules.csv")).resolve()
+    
+    rules_csv = Path(config.get("data_concepts_rules_csv", "config/niveau2/data_concepts_rules.csv")).resolve()
 
     concepts_dir = csv_dir / "data_concepts"
     concepts_dir.mkdir(parents=True, exist_ok=True)
@@ -431,9 +435,47 @@ def run_pipeline(config: dict) -> None:
     except Exception as e:
         logger.exception("  Erreur data_concepts_usage : %s", e)
 
-# n) Étape n : réservées pour futures branches (graphes, synthèse globale...)
-    logger.info("Pipeline terminé ✅")
+    # 15) Niveau 2.2 – Cartographie des structures de données (structures_cartography)
+    logger.info("Étape 15/16 – Cartographie des structures de données (structures_cartography)")
 
+    structures_dir = csv_dir / "structures_cartography"
+    structures_dir.mkdir(parents=True, exist_ok=True)
+
+    out_csv = structures_dir / "structures_cartography.csv"
+
+    try:
+        structures_cartography.build_structures_cartography(
+            dd_global_csv=data_dict_global,
+            usage_csv_dir=csv_dir,
+            rules_csv=rules_csv,
+            out_csv=out_csv,
+        )
+        logger.info("  structures_cartography : %s", out_csv)
+    except Exception as e:
+        logger.exception("  Erreur structures_cartography : %s", e)
+
+
+
+    # 16) Niveau 2.C – Consolidation des concepts (concepts_consolidation)
+    logger.info("Étape 16/16 – Consolidation des concepts (concepts_consolidation)")
+
+    consolidation_dir = csv_dir / "concepts_consolidation"
+    consolidation_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        generated = concepts_consolidation.build_concepts_consolidation(
+            structures_cartography_csv=out_csv,
+            out_dir=consolidation_dir,
+            top_n=int(config.get("concepts_top_n", 25) or 25),
+        )
+        logger.info("  concepts_summary           : %s", generated.get("concepts_summary"))
+        logger.info("  concepts_by_program        : %s", generated.get("concepts_by_program"))
+        logger.info("  top_transversal_structures : %s", generated.get("top_transversal_structures"))
+    except Exception as e:
+        logger.exception("  Erreur concepts_consolidation : %s", e)
+
+    # n) Étape n : réservées pour futures branches (graphes, synthèse globale...)
+    logger.info("Pipeline terminé ✅")
 
 # ============================================================
 #   Entrée principale

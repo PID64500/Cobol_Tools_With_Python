@@ -1,31 +1,36 @@
 priority;match_type;pattern;concept;comment
-1;contains;DUMP;TRACE_DIAGNOSTIC;Dump/diagnostic
-2;contains;ABEND;TRACE_DIAGNOSTIC;Abend/anomalie
-3;contains;ANOM;TRACE_DIAGNOSTIC;Anomalie
-4;contains;RACF;AUTORISATION_SECURITE;Sécurité RACF
-5;contains;AUTOR;AUTORISATION_SECURITE;Autorisation
-6;contains;HABIL;AUTORISATION_SECURITE;Habilitation
-7;contains;DROIT;AUTORISATION_SECURITE;Droits
-8;contains;MAP;NAVIGATION_IHM;BMS map/mapset
-9;contains;PF;NAVIGATION_IHM;Touches PF
-10;contains;MSG;NAVIGATION_IHM;Messages écran
-11;contains;CURS;NAVIGATION_IHM;Curseur
-12;contains;TRMID;SESSION_TERMINAL;Terminal
-13;contains;TERM;SESSION_TERMINAL;Terminal/session
-14;contains;ECRAN;SESSION_TERMINAL;Contexte écran
-15;contains;PAG;SESSION_TERMINAL;Pagination
-16;contains;USER;IDENTITE;Identité
-17;contains;IDENT;IDENTITE;Identité
-18;contains;NOM;IDENTITE;Nom
-19;contains;MATR;IDENTITE;Matricule
-20;contains;CONST;PARAMETRAGE_REFERENCE;Constantes
-21;contains;REF;PARAMETRAGE_REFERENCE;Référentiel
-22;contains;PARAM;PARAMETRAGE_REFERENCE;Paramétrage
-23;contains;CODE;PARAMETRAGE_REFERENCE;Code/référence (à confirmer)
-24;contains;LIB;PARAMETRAGE_REFERENCE;Libellé (à confirmer)
-25;contains;RESP;TECHNIQUE_CONTROLE;EIBRESP/RESP
-26;contains;RETOUR;TECHNIQUE_CONTROLE;Codes retour
-27;contains;RC;TECHNIQUE_CONTROLE;Return code
-28;contains;ERR;TECHNIQUE_CONTROLE;Erreur technique
-29;contains;EIB;TECHNIQUE_CONTROLE;Champs CICS EIB
-30;contains;DFH;TECHNIQUE_CONTROLE;Champs CICS DFH
+1;contains;DFHCOMMAREA;ECHANGE_PROGRAMME;COMMAREA CICS
+2;contains;COMMAREA;ECHANGE_PROGRAMME;Zone d’échange
+3;contains;COMCS;ECHANGE_PROGRAMME;COMMAREA applicative
+4;contains;DUMP;TRACE_DIAGNOSTIC;Dump/diagnostic
+5;contains;ABEND;TRACE_DIAGNOSTIC;Abend/anomalie
+6;contains;ANOM;TRACE_DIAGNOSTIC;Anomalie
+7;contains;RACF;AUTORISATION_SECURITE;Sécurité RACF
+8;contains;AUTOR;AUTORISATION_SECURITE;Autorisation
+9;contains;HABIL;AUTORISATION_SECURITE;Habilitation
+10;contains;DROIT;AUTORISATION_SECURITE;Droits
+11;contains;MAP;NAVIGATION_IHM;BMS map/mapset
+12;contains;PF;NAVIGATION_IHM;Touches PF
+13;contains;MSG;NAVIGATION_IHM;Messages écran
+14;contains;CURS;NAVIGATION_IHM;Curseur
+15;contains;TRMID;SESSION_TERMINAL;Terminal
+16;contains;TERM;SESSION_TERMINAL;Terminal/session
+17;contains;ECRAN;SESSION_TERMINAL;Contexte écran
+18;contains;PAG;SESSION_TERMINAL;Pagination
+19;contains;USER;IDENTITE;Identité
+20;contains;IDENT;IDENTITE;Identité
+21;contains;MATR;IDENTITE;Matricule
+22;contains;FSERV;DONNEE_METIER;Donnée métier service
+23;contains;FAPPA;DONNEE_METIER;Donnée métier application
+24;contains;RESP;TECHNIQUE_CONTROLE;EIBRESP/RESP
+25;contains;RETOUR;TECHNIQUE_CONTROLE;Codes retour
+26;contains;RC;TECHNIQUE_CONTROLE;Return code
+27;contains;ERR;TECHNIQUE_CONTROLE;Erreur technique
+28;contains;EIB;TECHNIQUE_CONTROLE;Champs CICS EIB
+29;contains;DFH;TECHNIQUE_CONTROLE;Champs CICS DFH
+30;contains;CONST;PARAMETRAGE_REFERENCE;Constantes
+31;contains;REF;DONNEE_METIER_REFERENCE;Référentiel métier (global)
+32;contains;PARAM;PARAMETRAGE_REFERENCE;Paramétrage
+33;contains;CODE;DONNEE_METIER_REFERENCE;Codes métier (global)
+34;contains;LIB;DONNEE_METIER_REFERENCE;Libellés métier (global)
+999;contains;FILLER;STRUCTURE_TECHNIQUE;Filler de structure COBOL

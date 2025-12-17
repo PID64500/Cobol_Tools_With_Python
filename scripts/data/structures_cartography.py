@@ -1,4 +1,4 @@
-# scripts/data/data_concepts_usage.py
+# scripts/data/structures_cartography.py
 from __future__ import annotations
 
 import csv
@@ -10,7 +10,6 @@ DEFAULT_CONCEPT = "TECHNIQUE_CONTROLE"
 
 
 def _sniff_delimiter(path: Path, candidates: Tuple[str, ...] = (";", ",", "\t", "|")) -> str:
-    """Best-effort delimiter detection for small CSV files."""
     sample = path.read_text(encoding="utf-8", errors="ignore").splitlines()[:5]
     if not sample:
         return ";"
@@ -28,7 +27,6 @@ def _sniff_delimiter(path: Path, candidates: Tuple[str, ...] = (";", ",", "\t", 
 def _read_dict_rows(path: Path, delimiter: Optional[str] = None) -> List[Dict[str, str]]:
     if delimiter is None:
         delimiter = _sniff_delimiter(path)
-
     with path.open("r", encoding="utf-8", errors="ignore", newline="") as f:
         reader = csv.DictReader(f, delimiter=delimiter)
         if reader.fieldnames:
@@ -85,30 +83,76 @@ def _extract_root(full_path: str) -> str:
     return fp.split("/", 1)[0] if "/" in fp else fp
 
 
-def build_data_concepts_usage(
+def _to_int(v: str, default: int = 0) -> int:
+    try:
+        return int(str(v).strip())
+    except Exception:
+        return default
+
+
+def _infer_role(name: str, pic: str, level: str, usage_reads: int, usage_writes: int, usage_conditions: int) -> str:
+    n = (name or "").upper()
+    p = (pic or "").upper()
+    lvl = str(level or "").strip()
+
+    if n == "FILLER":
+        return "STRUCTURE"
+    if usage_conditions > 0:
+        return "CONTROLE"
+    if "RESP" in n or "RETOUR" in n or n == "RC" or "ERR" in n:
+        return "TECHNIQUE"
+    if "ID" in n or "IDENT" in n or "CLE" in n or "KEY" in n:
+        return "CLE_METIER"
+    if lvl in ("01", "77") and not p:
+        return "STRUCTURE"
+    if usage_writes > 0 and usage_reads == 0:
+        return "TECHNIQUE"
+    return "DONNEE"
+
+
+def build_structures_cartography(
     dd_global_csv: Path,
     usage_csv_dir: Path,
     rules_csv: Path,
     out_csv: Path,
 ) -> Path:
-    """Build a transverse pivot of data concepts and usages."""
+    """Build a structure-centric cartography enriched with concept + usage."""
     rules = _load_rules(rules_csv)
 
-    # Load global DD with delimiter autodetection (',' or ';' typically)
     dd_rows = _read_dict_rows(dd_global_csv, delimiter=None)
 
-    dd_index: Dict[str, Dict[str, str]] = {}
+    dd_by_fp: Dict[str, Dict[str, object]] = {}
+
     for r in dd_rows:
-        fp = (r.get("full_path") or r.get("fullpath") or r.get("path") or r.get("variable") or "").strip()
+        fp = (r.get("full_path") or r.get("fullpath") or r.get("path") or "").strip()
         if not fp:
             fp = (r.get("name") or "").strip()
-        if fp:
-            dd_index[fp] = r
+        if not fp:
+            continue
 
-    # Aggregate usages from *_usage.csv (semicolon)
+        entry = dd_by_fp.get(fp)
+        if entry is None:
+            entry = {
+                "programs": set(),
+                "section": r.get("section", ""),
+                "level": r.get("level", ""),
+                "name": r.get("name", ""),
+                "full_path": fp,
+                "pic": r.get("pic", ""),
+            }
+            dd_by_fp[fp] = entry
+
+        prog = (r.get("program") or "").strip()
+        if prog:
+            entry["programs"].add(prog)
+
+        if not entry.get("section") and r.get("section"):
+            entry["section"] = r.get("section")
+        if not entry.get("pic") and r.get("pic"):
+            entry["pic"] = r.get("pic")
+
     usage_agg = defaultdict(lambda: {
         "programs": set(),
-        "usage_types": set(),
         "reads": 0,
         "writes": 0,
         "conditions": 0,
@@ -120,13 +164,11 @@ def build_data_concepts_usage(
             fp = (u.get("variable") or u.get("full_path") or u.get("fullpath") or "").strip()
             if not fp:
                 continue
+
             ut = (u.get("usage_type") or "").strip().lower()
             prog = (u.get("program") or "").strip()
-
             if prog:
                 usage_agg[fp]["programs"].add(prog)
-            if ut:
-                usage_agg[fp]["usage_types"].add(ut)
 
             if ut == "read":
                 usage_agg[fp]["reads"] += 1
@@ -140,50 +182,60 @@ def build_data_concepts_usage(
     with out_csv.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, delimiter=";")
         w.writerow([
-            "concept",
-            "variable_root",
+            "structure_root",
+            "section",
+            "level",
+            "name",
             "full_path",
             "pic",
+            "concept",
+            "role",
             "programs",
-            "usage_types",
             "nb_programs",
             "total_reads",
             "total_writes",
             "total_conditions",
-            "risk_indicator",
-            "notes",
+            "usage_summary",
         ])
 
-        for fp, agg in sorted(usage_agg.items(), key=lambda x: x[0]):
-            dd = dd_index.get(fp, {})
-            pic = (dd.get("pic") or "").strip()
-
-            concept = _match_concept(fp, rules)
+        for fp, d in sorted(dd_by_fp.items(), key=lambda x: x[0]):
             root = _extract_root(fp)
+            concept = _match_concept(fp, rules)
 
-            nb_prog = len(agg["programs"])
-            has_write = agg["writes"] > 0
+            u = usage_agg.get(fp, {"programs": set(), "reads": 0, "writes": 0, "conditions": 0})
+            total_reads = _to_int(u.get("reads", 0))
+            total_writes = _to_int(u.get("writes", 0))
+            total_cond = _to_int(u.get("conditions", 0))
 
-            if nb_prog >= 3 and has_write:
-                risk = "HIGH"
-            elif nb_prog >= 2:
-                risk = "MEDIUM"
-            else:
-                risk = "LOW"
+            programs = set(d.get("programs", set())) | set(u.get("programs", set()))
+            nb_prog = len(programs)
+
+            role = _infer_role(
+                name=str(d.get("name", "")),
+                pic=str(d.get("pic", "")),
+                level=str(d.get("level", "")),
+                usage_reads=total_reads,
+                usage_writes=total_writes,
+                usage_conditions=total_cond,
+            )
+
+            usage_summary = f"R={total_reads} W={total_writes} C={total_cond}"
 
             w.writerow([
-                concept,
                 root,
+                d.get("section", ""),
+                d.get("level", ""),
+                d.get("name", ""),
                 fp,
-                pic,
-                "|".join(sorted(agg["programs"])),
-                "|".join(sorted(agg["usage_types"])),
+                d.get("pic", ""),
+                concept,
+                role,
+                "|".join(sorted(programs)),
                 nb_prog,
-                agg["reads"],
-                agg["writes"],
-                agg["conditions"],
-                risk,
-                "",
+                total_reads,
+                total_writes,
+                total_cond,
+                usage_summary,
             ])
 
     return out_csv
